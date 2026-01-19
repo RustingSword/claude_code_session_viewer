@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bubble" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#8b5cf6;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <!-- 对话气泡 -->
+  <path d="M 20 40 L 236 40 Q 256 40 256 60 L 256 180 Q 256 200 236 200 L 100 200 L 40 256 L 70 200 L 20 200 Q 0 200 0 180 L 0 60 Q 0 40 20 40 Z"
+        fill="url(#bubble)"/>
+
+  <!-- 文本线条 -->
+  <line x1="40" y1="80" x2="216" y2="80" stroke="white" stroke-width="16" stroke-linecap="round" opacity="0.9"/>
+  <line x1="40" y1="120" x2="190" y2="120" stroke="white" stroke-width="16" stroke-linecap="round" opacity="0.9"/>
+  <line x1="40" y1="160" x2="170" y2="160" stroke="white" stroke-width="16" stroke-linecap="round" opacity="0.9"/>
+
+  <!-- C字母徽章 -->
+  <circle cx="200" cy="50" r="50" fill="#10b981"/>
+  <text x="200" y="80" font-family="Arial, sans-serif" font-size="70" font-weight="bold" fill="white" text-anchor="middle">C</text>
+</svg>

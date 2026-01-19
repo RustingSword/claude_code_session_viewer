@@ -1,0 +1,744 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Claude 会话查看器</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+      mark {
+        background-color: #fef08a;
+        padding: 0 2px;
+        border-radius: 2px;
+      }
+      .markdown-content h1 { font-size: 1.5em; font-weight: bold; margin: 0.5em 0; }
+      .markdown-content h2 { font-size: 1.3em; font-weight: bold; margin: 0.5em 0; }
+      .markdown-content h3 { font-size: 1.1em; font-weight: bold; margin: 0.5em 0; }
+      .markdown-content code { background: #f1f5f9; padding: 0.2em 0.4em; border-radius: 3px; font-family: monospace; }
+      .markdown-content pre { background: #f1f5f9; padding: 1em; border-radius: 6px; overflow-x: auto; }
+      .markdown-content pre code { background: none; padding: 0; }
+      .markdown-content ul { list-style: disc; margin-left: 1.5em; }
+      .markdown-content ol { list-style: decimal; margin-left: 1.5em; }
+      .markdown-content a { color: #3b82f6; text-decoration: underline; }
+
+      /* 改进 pre 标签的文本换行 */
+      pre {
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
+      }
+
+      /* 确保代码块不会超出容器 */
+      pre code {
+        display: block;
+        max-width: 100%;
+      }
+    </style>
+  </head>
+  <body class="bg-slate-50 text-slate-900">
+    <div class="flex h-screen">
+      <!-- 左侧边栏 -->
+      <aside class="w-80 border-r bg-white flex flex-col">
+        <div class="p-5 border-b">
+          <div class="text-lg font-semibold">Claude 会话查看器</div>
+          <div class="text-xs text-slate-500 mt-1">
+            本地会话历史浏览器
+          </div>
+          <label class="block text-xs text-slate-500 mt-4">项目</label>
+          <select
+            id="projectSelect"
+            class="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          ></select>
+        </div>
+        <div class="px-5 pt-4 text-xs uppercase text-slate-400 tracking-wider">
+          会话列表
+        </div>
+        <div id="sessionList" class="flex-1 overflow-y-auto px-3 pb-4"></div>
+      </aside>
+
+      <!-- 主内容区 -->
+      <main class="flex-1 flex flex-col">
+        <!-- 搜索栏 -->
+        <div class="border-b bg-white p-5">
+          <div class="flex items-center gap-3">
+            <input
+              id="searchInput"
+              type="text"
+              placeholder="搜索消息内容..."
+              class="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <label class="flex items-center gap-2 text-sm text-slate-600">
+              <input type="checkbox" id="searchCurrentProjectOnly" class="rounded" />
+              <span>仅当前项目</span>
+            </label>
+            <button
+              id="searchBtn"
+              class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+            >
+              搜索
+            </button>
+            <button
+              id="clearSearchBtn"
+              class="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+            >
+              清除
+            </button>
+          </div>
+          <div id="searchMeta" class="mt-2 text-xs text-slate-500"></div>
+        </div>
+
+        <!-- 消息列表 -->
+        <div class="flex-1 overflow-y-auto p-6">
+          <div id="sessionMeta" class="mb-4 text-sm text-slate-500"></div>
+          <div id="messageList" class="space-y-4"></div>
+
+          <!-- 搜索结果 -->
+          <div id="searchResults" class="hidden space-y-3"></div>
+
+          <!-- 加载更多按钮 -->
+          <button
+            id="loadMoreBtn"
+            class="mt-6 hidden rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            加载更多
+          </button>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      // DOM 元素引用
+      const projectSelect = document.getElementById("projectSelect");
+      const sessionList = document.getElementById("sessionList");
+      const messageList = document.getElementById("messageList");
+      const sessionMeta = document.getElementById("sessionMeta");
+      const searchInput = document.getElementById("searchInput");
+      const searchBtn = document.getElementById("searchBtn");
+      const clearSearchBtn = document.getElementById("clearSearchBtn");
+      const searchMeta = document.getElementById("searchMeta");
+      const searchResults = document.getElementById("searchResults");
+      const loadMoreBtn = document.getElementById("loadMoreBtn");
+      const searchCurrentProjectOnly = document.getElementById("searchCurrentProjectOnly");
+
+      // 应用状态
+      const state = {
+        projects: [],
+        currentProject: "",
+        sessions: [],
+        currentSessionId: "",
+        offset: 0,
+        limit: 200,
+        hasMore: false,
+        searchQuery: "",
+        searchOffset: 0,
+        searchHasMore: false,
+        searchTotal: 0,
+      };
+
+      // 工具函数
+      function formatTimestamp(timestamp) {
+        if (!timestamp) return "";
+        try {
+          const date = new Date(timestamp);
+          const year = date.getFullYear();
+          const month = String(date.getMonth() + 1).padStart(2, "0");
+          const day = String(date.getDate()).padStart(2, "0");
+          const hours = String(date.getHours()).padStart(2, "0");
+          const minutes = String(date.getMinutes()).padStart(2, "0");
+          const seconds = String(date.getSeconds()).padStart(2, "0");
+          return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+        } catch {
+          return timestamp;
+        }
+      }
+
+      function escapeHtml(text) {
+        return String(text || "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function escapeRegex(text) {
+        return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      }
+
+      function highlight(text, query) {
+        const safe = escapeHtml(text || "");
+        if (!query) return safe;
+        const terms = query.trim().split(/\s+/).filter(Boolean);
+        if (!terms.length) return safe;
+        let out = safe;
+        for (const term of terms) {
+          const regex = new RegExp(escapeRegex(term), "ig");
+          out = out.replace(regex, (match) => `<mark>${match}</mark>`);
+        }
+        return out;
+      }
+
+      async function api(path) {
+        const res = await fetch(path);
+        if (!res.ok) {
+          throw new Error(`请求失败: ${res.status}`);
+        }
+        return res.json();
+      }
+
+      // 渲染函数
+      function renderProjects() {
+        projectSelect.innerHTML = "";
+        if (!state.projects.length) {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = "未找到项目";
+          projectSelect.appendChild(option);
+          return;
+        }
+        for (const project of state.projects) {
+          const option = document.createElement("option");
+          option.value = project.project;
+          option.textContent = `${project.project} (${project.session_count})`;
+          projectSelect.appendChild(option);
+        }
+        projectSelect.value = state.currentProject;
+      }
+
+      function renderSessions() {
+        sessionList.innerHTML = "";
+        if (!state.sessions.length) {
+          sessionList.innerHTML =
+            '<div class="p-4 text-sm text-slate-400">未找到会话</div>';
+          return;
+        }
+        for (const session of state.sessions) {
+          const isActive = session.session_id === state.currentSessionId;
+          const wrapper = document.createElement("div");
+          wrapper.className =
+            "cursor-pointer rounded-lg border border-slate-200 bg-white p-3 mb-3 shadow-sm hover:border-indigo-300 transition-colors";
+          if (isActive) {
+            wrapper.classList.add("border-indigo-500", "shadow");
+          }
+          wrapper.dataset.sessionId = session.session_id;
+          wrapper.innerHTML = `
+            <div class="text-sm font-semibold text-slate-700">${escapeHtml(
+              session.session_id.slice(0, 8)
+            )}</div>
+            <div class="text-xs text-slate-500 mt-1" style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">
+              ${escapeHtml(session.summary || "无摘要")}
+            </div>
+            <div class="mt-2 text-[11px] text-slate-400 flex justify-between">
+              <span>${escapeHtml(session.updated_at || "")}</span>
+              <span>${session.message_count || 0} 条消息</span>
+            </div>
+          `;
+          wrapper.addEventListener("click", () => {
+            loadSession(session.session_id);
+          });
+          sessionList.appendChild(wrapper);
+        }
+      }
+
+      function renderSessionMeta() {
+        const session = state.sessions.find(
+          (s) => s.session_id === state.currentSessionId
+        );
+        if (!session) {
+          sessionMeta.textContent = "";
+          return;
+        }
+        sessionMeta.innerHTML = `
+          <div class="flex flex-wrap gap-3 text-xs text-slate-500">
+            <span class="font-semibold text-slate-700">${escapeHtml(
+              session.session_id
+            )}</span>
+            <span>会话时间: ${formatTimestamp(session.started_at)} ~ ${formatTimestamp(session.updated_at)}</span>
+            <span>消息数: ${session.message_count || 0}</span>
+            <span>${escapeHtml(session.cwd || "")}</span>
+            <span>${escapeHtml(session.git_branch || "")}</span>
+          </div>
+        `;
+      }
+
+      function parseContent(content) {
+        if (!content) return [];
+        try {
+          const parsed = JSON.parse(content);
+          return Array.isArray(parsed) ? parsed : [{ type: "text", text: String(content) }];
+        } catch {
+          return [{ type: "text", text: String(content) }];
+        }
+      }
+
+      function formatJsonForDisplay(obj) {
+        return JSON.stringify(obj, null, 2);
+      }
+
+      function unescapeJsonString(str) {
+        return str.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+      }
+
+      function renderBox({ collapsible = false, bgClass, borderClass, titleClass = "", title = "", summary = "", bodyHtml }) {
+        const containerClass = `mt-2 rounded-lg ${bgClass} border ${borderClass} p-3`;
+        if (collapsible) {
+          return `
+            <details class="${containerClass}">
+              <summary class="cursor-pointer text-xs font-semibold ${titleClass} select-none">
+                ${summary}
+              </summary>
+              ${bodyHtml}
+            </details>
+          `;
+        }
+        const titleHtml = title
+          ? `<div class="text-xs font-semibold ${titleClass}">${title}</div>`
+          : "";
+        return `
+          <div class="${containerClass}">
+            ${titleHtml}
+            ${bodyHtml}
+          </div>
+        `;
+      }
+
+      function renderCollapsible({ bgClass, borderClass, summaryClass, summary, bodyHtml }) {
+        return renderBox({
+          collapsible: true,
+          bgClass,
+          borderClass,
+          titleClass: summaryClass,
+          summary,
+          bodyHtml,
+        });
+      }
+
+      function renderPanel({ bgClass, borderClass, titleClass, title, bodyHtml }) {
+        return renderBox({ bgClass, borderClass, titleClass, title, bodyHtml });
+      }
+
+      function renderCodeBlock(content, extraClass = "") {
+        const classes = `mt-2 text-xs text-slate-600 overflow-x-auto whitespace-pre-wrap break-words ${extraClass}`.trim();
+        return `<pre class="${classes}"><code>${escapeHtml(content)}</code></pre>`;
+      }
+
+      function getRoleClasses(role, type) {
+        if (role === "user" || type === "user") {
+          return {
+            badgeClass: "bg-indigo-600 text-white",
+            bubbleClass: "bg-indigo-50 border-indigo-200",
+          };
+        }
+        if (role === "assistant" || type === "assistant") {
+          return {
+            badgeClass: "bg-emerald-600 text-white",
+            bubbleClass: "bg-emerald-50 border-emerald-200",
+          };
+        }
+        return {
+          badgeClass: "bg-slate-200 text-slate-600",
+          bubbleClass: "bg-white border-slate-200",
+        };
+      }
+
+      function renderTextBlock(text) {
+        const content = text || "";
+        const isSystemMessage = content.includes("<local-command-") || content.includes("<command-") || content.includes("<system-");
+
+        if (isSystemMessage) {
+          return renderCollapsible({
+            bgClass: "bg-slate-100",
+            borderClass: "border-slate-300",
+            summaryClass: "text-slate-600",
+            summary: `📋 系统消息 (${content.length} 字符)`,
+            bodyHtml: `<div class="mt-2 text-xs text-slate-600 whitespace-pre-wrap break-words">${escapeHtml(content)}</div>`,
+          });
+        }
+
+        if (content.length > 1500) {
+          return renderCollapsible({
+            bgClass: "bg-slate-50",
+            borderClass: "border-slate-200",
+            summaryClass: "text-slate-600",
+            summary: `📄 长文本 (${content.length} 字符，点击展开)`,
+            bodyHtml: `<div class="mt-2 text-sm text-slate-800 markdown-content">${marked.parse(content)}</div>`,
+          });
+        }
+
+        return `<div class="text-sm text-slate-800 markdown-content">${marked.parse(content)}</div>`;
+      }
+
+      function formatToolResultContent(block) {
+        const content = block.content || block;
+        if (typeof content === "string") {
+          try {
+            return formatJsonForDisplay(JSON.parse(content));
+          } catch {
+            return unescapeJsonString(content);
+          }
+        }
+        return formatJsonForDisplay(content);
+      }
+
+      function renderToolResult(block) {
+        const displayContent = formatToolResultContent(block);
+        const isLong = displayContent.length > 2000;
+        const bodyHtml = renderCodeBlock(displayContent, isLong ? "max-h-96" : "max-h-60");
+
+        if (isLong) {
+          return renderCollapsible({
+            bgClass: "bg-green-50",
+            borderClass: "border-green-200",
+            summaryClass: "text-green-700",
+            summary: `✓ 工具结果 (${displayContent.length} 字符，点击展开)`,
+            bodyHtml,
+          });
+        }
+
+        return renderPanel({
+          bgClass: "bg-green-50",
+          borderClass: "border-green-200",
+          titleClass: "text-green-700",
+          title: "✓ 工具结果",
+          bodyHtml,
+        });
+      }
+
+      const contentRenderers = {
+        thinking: (block) => renderCollapsible({
+          bgClass: "bg-amber-50",
+          borderClass: "border-amber-200",
+          summaryClass: "text-amber-700",
+          summary: "💭 思考过程",
+          bodyHtml: `<div class="mt-2 text-sm text-slate-700 markdown-content">${marked.parse(block.thinking || "")}</div>`,
+        }),
+        image: (block) => {
+          const source = block.source || {};
+          const data = source.data || "";
+          if (!data) {
+            return `<div class="text-sm text-slate-500">图片数据缺失</div>`;
+          }
+          const mediaType = source.media_type || "image/png";
+          return renderPanel({
+            bgClass: "bg-white",
+            borderClass: "border-slate-200",
+            titleClass: "text-slate-600 mb-2",
+            title: "🖼️ 图片",
+            bodyHtml: `<img src="data:${mediaType};base64,${data}" class="max-w-full h-auto rounded" alt="消息图片" />`,
+          });
+        },
+        text: (block) => renderTextBlock(block.text),
+        tool_use: (block) => renderPanel({
+          bgClass: "bg-blue-50",
+          borderClass: "border-blue-200",
+          titleClass: "text-blue-700",
+          title: `🔧 ${escapeHtml(block.name || "工具调用")}`,
+          bodyHtml: renderCodeBlock(formatJsonForDisplay(block.input || {})),
+        }),
+        tool_result: renderToolResult,
+      };
+
+      function renderContentBlock(block) {
+        if (!block || typeof block !== "object") {
+          return `<div class="text-sm text-slate-800">${escapeHtml(String(block))}</div>`;
+        }
+
+        const type = block.type || "unknown";
+        const renderer = Object.hasOwn(contentRenderers, type) ? contentRenderers[type] : null;
+        if (renderer) {
+          return renderer(block);
+        }
+
+        return `<pre class="text-xs text-slate-500 overflow-x-auto whitespace-pre-wrap break-words"><code>${escapeHtml(formatJsonForDisplay(block))}</code></pre>`;
+      }
+
+      function renderMessages(items) {
+        if (!items.length) {
+          messageList.innerHTML =
+            '<div class="text-sm text-slate-400">暂无消息</div>';
+          return;
+        }
+        for (const item of items) {
+          const role = item.role || item.type || "event";
+
+          // 跳过不显示的事件类型
+          const skipTypes = ["summary", "file-history-snapshot", "progress"];
+          if (item.type === "progress" || (skipTypes.includes(item.type) && !item.content)) {
+            continue;
+          }
+
+          const { badgeClass, bubbleClass } = getRoleClasses(role, item.type);
+
+          const wrapper = document.createElement("div");
+          wrapper.className = `rounded-xl border ${bubbleClass} p-4 shadow-sm`;
+          // 添加ID以支持锚点跳转
+          if (item.timestamp) {
+            wrapper.id = `msg-${item.timestamp}`;
+          }
+
+          const contentBlocks = parseContent(item.content);
+          const contentHtml = contentBlocks.map(block => renderContentBlock(block)).join("");
+
+          wrapper.innerHTML = `
+            <div class="flex items-center justify-between">
+              <span class="rounded-full px-2 py-1 text-xs font-semibold ${badgeClass}">
+                ${escapeHtml(role)}
+              </span>
+              <span class="text-xs text-slate-400">
+                ${formatTimestamp(item.timestamp)}
+              </span>
+            </div>
+            <div class="mt-3 space-y-2">
+              ${contentHtml}
+            </div>
+          `;
+          messageList.appendChild(wrapper);
+        }
+      }
+
+      function renderSearchResults(results, append = false) {
+        if (!append) {
+          searchResults.innerHTML = "";
+        }
+        if (!results.length && !append) {
+          searchResults.innerHTML =
+            '<div class="text-sm text-slate-400">未找到结果</div>';
+          return;
+        }
+        for (const result of results) {
+          const card = document.createElement("div");
+          card.className =
+            "rounded-xl border border-slate-200 bg-white p-4 shadow-sm hover:shadow-md transition-shadow";
+          card.innerHTML = `
+            <div class="flex items-center justify-between text-xs text-slate-500">
+              <span class="font-semibold text-slate-700">${escapeHtml(
+                result.project
+              )}</span>
+              <span>${formatTimestamp(result.timestamp)}</span>
+            </div>
+            <div class="mt-2 text-xs text-slate-400">
+              会话 ${escapeHtml(result.session_id)}
+            </div>
+            <div class="mt-3 text-sm text-slate-800 whitespace-pre-wrap break-words">
+              ${highlight(result.excerpt || "", state.searchQuery)}
+            </div>
+            <div class="mt-3 flex gap-3">
+              <button
+                class="jump-to-message text-xs font-medium text-indigo-600 hover:text-indigo-800"
+                data-session="${escapeHtml(result.session_id)}"
+                data-project="${escapeHtml(result.project)}"
+                data-timestamp="${escapeHtml(result.timestamp)}"
+              >
+                跳转到消息 →
+              </button>
+              <button
+                class="open-session text-xs font-medium text-slate-600 hover:text-slate-800"
+                data-session="${escapeHtml(result.session_id)}"
+                data-project="${escapeHtml(result.project)}"
+              >
+                打开会话 →
+              </button>
+            </div>
+          `;
+
+          card.querySelector(".jump-to-message").addEventListener("click", () => {
+            openSessionFromSearch({
+              sessionId: result.session_id,
+              project: result.project,
+              timestamp: result.timestamp,
+            }).catch(console.error);
+          });
+
+          card.querySelector(".open-session").addEventListener("click", () => {
+            openSessionFromSearch({
+              sessionId: result.session_id,
+              project: result.project,
+            }).catch(console.error);
+          });
+
+          searchResults.appendChild(card);
+        }
+      }
+
+      function isSearchView() {
+        return !searchResults.classList.contains("hidden");
+      }
+
+      async function ensureProjectLoaded(project) {
+        if (project === state.currentProject) {
+          return;
+        }
+        state.currentProject = project;
+        projectSelect.value = project;
+        await loadSessions(project);
+      }
+
+      function scrollToMessage(timestamp) {
+        if (!timestamp) {
+          return;
+        }
+        setTimeout(() => {
+          const msgElement = document.getElementById(`msg-${timestamp}`);
+          if (msgElement) {
+            msgElement.scrollIntoView({ behavior: "smooth", block: "center" });
+            msgElement.style.backgroundColor = "#fef3c7";
+            setTimeout(() => {
+              msgElement.style.backgroundColor = "";
+            }, 2000);
+          }
+        }, 100);
+      }
+
+      async function openSessionFromSearch({ sessionId, project, timestamp }) {
+        await ensureProjectLoaded(project);
+        await loadSession(sessionId);
+        showSessionView();
+        if (timestamp) {
+          scrollToMessage(timestamp);
+        }
+      }
+
+      function setViewMode(showSearch) {
+        searchResults.classList.toggle("hidden", !showSearch);
+        messageList.classList.toggle("hidden", showSearch);
+        if (showSearch) {
+          loadMoreBtn.classList.add("hidden");
+        }
+      }
+
+      function showSearchView() {
+        setViewMode(true);
+      }
+
+      function showSessionView() {
+        setViewMode(false);
+      }
+
+      // 数据加载函数
+      async function loadProjects() {
+        const data = await api("/api/projects");
+        state.projects = data.projects || [];
+        state.currentProject = state.projects[0]?.project || "";
+        renderProjects();
+        if (state.currentProject) {
+          await loadSessions(state.currentProject);
+        }
+      }
+
+      async function loadSessions(project) {
+        const data = await api(
+          `/api/projects/${encodeURIComponent(project)}/sessions`
+        );
+        state.sessions = data.sessions || [];
+        state.currentSessionId = state.sessions[0]?.session_id || "";
+        renderSessions();
+        renderSessionMeta();
+        if (state.currentSessionId) {
+          await loadSession(state.currentSessionId);
+        } else {
+          messageList.innerHTML =
+            '<div class="text-sm text-slate-400">选择一个会话查看</div>';
+        }
+      }
+
+      async function loadSession(sessionId, append = false) {
+        state.currentSessionId = sessionId;
+        // 如果不是追加模式，重置分页状态
+        if (!append) {
+          state.offset = 0;
+        }
+        const path = `/api/sessions/${encodeURIComponent(
+          sessionId
+        )}?project=${encodeURIComponent(state.currentProject)}&offset=${
+          state.offset
+        }&limit=${state.limit}`;
+        const data = await api(path);
+        state.hasMore = Boolean(data.next_offset);
+        state.offset = data.next_offset || 0;
+        if (!append) {
+          messageList.innerHTML = "";
+        }
+        renderSessionMeta();
+        renderMessages(data.items || []);
+        loadMoreBtn.classList.toggle("hidden", !state.hasMore);
+        renderSessions();
+        showSessionView();
+      }
+
+      async function runSearch(append = false) {
+        const query = searchInput.value.trim();
+        state.searchQuery = query;
+        if (!query) {
+          searchMeta.textContent = "";
+          showSessionView();
+          return;
+        }
+
+        // 如果不是追加模式，重置搜索状态
+        if (!append) {
+          state.searchOffset = 0;
+          searchResults.innerHTML = "";
+        }
+
+        let path = `/api/search?q=${encodeURIComponent(query)}&offset=${state.searchOffset}&limit=50`;
+        // 只有勾选了"仅当前项目"且 currentProject 存在时才添加 project 参数
+        if (searchCurrentProjectOnly.checked && state.currentProject) {
+          path += `&project=${encodeURIComponent(state.currentProject)}`;
+        }
+        try {
+          const data = await api(path);
+          state.searchTotal = data.total || 0;
+          state.searchHasMore = data.has_more || false;
+          state.searchOffset = data.offset + (data.results?.length || 0);
+
+          searchMeta.textContent = `找到 ${state.searchTotal} 条结果，已显示 ${state.searchOffset} 条`;
+
+          renderSearchResults(data.results || [], append);
+          showSearchView();
+
+          // 显示或隐藏"加载更多"按钮
+          loadMoreBtn.classList.toggle("hidden", !state.searchHasMore);
+        } catch (error) {
+          searchMeta.textContent = `搜索错误: ${error.message}`;
+          searchResults.innerHTML = `<div class="text-sm text-red-600">${escapeHtml(error.message)}</div>`;
+          showSearchView();
+        }
+      }
+
+      // 事件监听
+      projectSelect.addEventListener("change", async (event) => {
+        state.currentProject = event.target.value;
+        state.offset = 0;
+        await loadSessions(state.currentProject);
+      });
+
+      searchBtn.addEventListener("click", runSearch);
+      clearSearchBtn.addEventListener("click", () => {
+        searchInput.value = "";
+        searchMeta.textContent = "";
+        showSessionView();
+      });
+      searchInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          runSearch();
+        }
+      });
+      loadMoreBtn.addEventListener("click", async () => {
+        if (isSearchView()) {
+          await runSearch(true);
+        } else {
+          await loadSession(state.currentSessionId, true);
+        }
+      });
+
+      // 初始化
+      loadProjects().catch((error) => {
+        messageList.innerHTML = `<div class="text-sm text-red-600">${escapeHtml(
+          error.message
+        )}</div>`;
+      });
+    </script>
+  </body>
+</html>
