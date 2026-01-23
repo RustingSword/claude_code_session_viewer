@@ -1,12 +1,10 @@
 # Claude Code 会话查看器
 
-一个用于浏览和搜索 Claude Code 本地会话历史的 Web 工具。
+一个用于浏览和搜索 Claude Code/Codex 本地会话历史的 Web 工具。
 
 ## 为什么要写这个工具？
 
 现在有了 Claude Code 这样的 AI 编程助手，写小工具变得非常简单。遇到需求时，直接让 AI 帮忙写代码，几分钟就能完成一个功能完整的工具，不用再花时间在网上找现成的了。
-
-这个项目就是一个很好的例子——从零开始，通过与 Claude Code 对话，快速实现了一个功能丰富的会话查看器。
 
 ## 功能特性
 
@@ -15,8 +13,6 @@
 - 📄 **分页加载**: 支持大量会话和搜索结果的分页浏览
 - 🎯 **精准定位**: 从搜索结果直接跳转到会话中的具体消息
 - 🎨 **现代界面**: 使用 Tailwind CSS 构建的清爽界面
-- ⚡ **高性能**: 基于 SQLite FTS5 全文索引，搜索快速
-- 🗜️ **空间优化**: 优化的索引策略，数据库占用空间小
 
 ## 技术栈
 
@@ -60,6 +56,7 @@ uvicorn claude_viewer:app --reload
 
 ```bash
 export CLAUDE_PROJECTS_DIR=~/.claude/projects  # Claude 项目目录
+export CODEX_SESSIONS_DIR=~/.codex/sessions  # Codex sessions 目录
 export CLAUDE_VIEWER_DB=~/.claude/claude_viewer.sqlite3  # 数据库路径
 ```
 
@@ -75,32 +72,6 @@ export CLAUDE_VIEWER_DB=~/.claude/claude_viewer.sqlite3  # 数据库路径
 - **中英文混合**: 完美支持中英文混合搜索
 - **上下文显示**: 搜索结果智能显示关键词上下文
 
-### 搜索效果对比
-
-```python
-# 查询: "数据库"
-字符级分词: "数 据 库"  # 可能匹配到不相关的结果
-jieba 分词:  "数据 据库 数据库"  # 精准匹配词语
-
-# 查询: "搜索性能"
-字符级分词: "搜 索 性 能"  # 单个字符匹配
-jieba 分词:  "搜索 性能"  # 词组匹配
-```
-
-### 数据库维护
-
-如果需要重建索引（例如更新分词策略）：
-
-```bash
-python rebuild_index.py
-```
-
-这个脚本会：
-1. 自动备份原数据库
-2. 重建所有索引
-3. 执行 VACUUM 压缩
-4. 显示最终大小
-
 ## 项目结构
 
 ```
@@ -109,9 +80,6 @@ python rebuild_index.py
 ├── claude_viewer.html       # 前端界面
 ├── favicon.svg              # 网站图标
 ├── run_claude_viewer.sh     # 启动脚本
-├── rebuild_index.py         # 索引重建工具
-├── requirements.txt         # Python 依赖
-├── compare_tokenizers.py    # 分词效果对比工具
 └── README.md               # 本文件
 ```
 
