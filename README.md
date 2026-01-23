@@ -11,17 +11,19 @@
 ## 功能特性
 
 - 📁 **项目管理**: 按项目组织和浏览会话
-- 🔍 **全文搜索**: 支持中英文混合搜索，智能显示关键词上下文
+- 🔍 **智能搜索**: 使用 jieba 分词的中文全文搜索，支持词语级别的精准匹配
 - 📄 **分页加载**: 支持大量会话和搜索结果的分页浏览
 - 🎯 **精准定位**: 从搜索结果直接跳转到会话中的具体消息
 - 🎨 **现代界面**: 使用 Tailwind CSS 构建的清爽界面
 - ⚡ **高性能**: 基于 SQLite FTS5 全文索引，搜索快速
+- 🗜️ **空间优化**: 优化的索引策略，数据库占用空间小
 
 ## 技术栈
 
 - **后端**: Python + FastAPI
 - **前端**: 原生 JavaScript + Tailwind CSS
 - **数据库**: SQLite + FTS5 全文搜索
+- **中文分词**: jieba（可选，自动回退到字符级分词）
 - **Markdown**: Marked.js 渲染
 
 ## 快速开始
@@ -29,7 +31,13 @@
 ### 安装依赖
 
 ```bash
-pip install fastapi uvicorn
+pip install -r requirements.txt
+```
+
+或手动安装：
+
+```bash
+pip install fastapi uvicorn jieba
 ```
 
 ### 运行
@@ -57,32 +65,55 @@ export CLAUDE_VIEWER_DB=~/.claude/claude_viewer.sqlite3  # 数据库路径
 
 ## 中文搜索支持
 
-项目实现了对中文搜索的完整支持：
+项目使用 **jieba 分词** 实现高质量的中文搜索：
 
-- 在索引时对中文文本进行预处理（添加空格）
-- 使用 SQLite FTS5 的 unicode61 tokenizer
-- 搜索结果智能显示关键词上下文
-- 自动高亮搜索关键词
+### 搜索特性
+
+- **词语级别匹配**: 使用 jieba 进行专业的中文分词
+- **多粒度索引**: 搜索引擎模式生成多粒度的词，提高召回率
+- **智能回退**: 如果 jieba 不可用，自动回退到字符级分词
+- **中英文混合**: 完美支持中英文混合搜索
+- **上下文显示**: 搜索结果智能显示关键词上下文
+
+### 搜索效果对比
+
+```python
+# 查询: "数据库"
+字符级分词: "数 据 库"  # 可能匹配到不相关的结果
+jieba 分词:  "数据 据库 数据库"  # 精准匹配词语
+
+# 查询: "搜索性能"
+字符级分词: "搜 索 性 能"  # 单个字符匹配
+jieba 分词:  "搜索 性能"  # 词组匹配
+```
+
+### 数据库维护
+
+如果需要重建索引（例如更新分词策略）：
+
+```bash
+python rebuild_index.py
+```
+
+这个脚本会：
+1. 自动备份原数据库
+2. 重建所有索引
+3. 执行 VACUUM 压缩
+4. 显示最终大小
 
 ## 项目结构
 
 ```
 .
-├── claude_viewer.py      # 后端 API 服务
-├── claude_viewer.html    # 前端界面
-├── favicon.svg           # 网站图标
-├── run_claude_viewer.sh  # 启动脚本
-└── README.md            # 本文件
+├── claude_viewer.py         # 后端 API 服务
+├── claude_viewer.html       # 前端界面
+├── favicon.svg              # 网站图标
+├── run_claude_viewer.sh     # 启动脚本
+├── rebuild_index.py         # 索引重建工具
+├── requirements.txt         # Python 依赖
+├── compare_tokenizers.py    # 分词效果对比工具
+└── README.md               # 本文件
 ```
-
-## 开发体验
-
-这个项目完全通过与 Claude Code 对话开发完成，展示了 AI 辅助编程的强大能力：
-
-- ✅ 快速原型开发
-- ✅ 实时问题解决
-- ✅ 代码优化和重构
-- ✅ 功能迭代和完善
 
 ## License
 

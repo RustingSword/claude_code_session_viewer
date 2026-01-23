@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Claude 会话查看器</title>
+    <title>Claude / Codex 会话查看器</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
@@ -42,7 +42,7 @@
       <!-- 左侧边栏 -->
       <aside class="w-80 border-r bg-white flex flex-col">
         <div class="p-5 border-b">
-          <div class="text-lg font-semibold">Claude 会话查看器</div>
+          <div class="text-lg font-semibold">Claude / Codex 会话查看器</div>
           <div class="text-xs text-slate-500 mt-1">
             本地会话历史浏览器
           </div>
@@ -69,6 +69,17 @@
               placeholder="搜索消息内容..."
               class="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
             />
+            <label class="flex items-center gap-2 text-sm text-slate-600">
+              <span>类型</span>
+              <select
+                id="searchSource"
+                class="rounded-lg border border-slate-200 px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="">全部</option>
+                <option value="claude_code">Claude Code</option>
+                <option value="codex">Codex</option>
+              </select>
+            </label>
             <label class="flex items-center gap-2 text-sm text-slate-600">
               <input type="checkbox" id="searchCurrentProjectOnly" class="rounded" />
               <span>仅当前项目</span>
@@ -119,13 +130,15 @@
       const clearSearchBtn = document.getElementById("clearSearchBtn");
       const searchMeta = document.getElementById("searchMeta");
       const searchResults = document.getElementById("searchResults");
+      const searchSource = document.getElementById("searchSource");
       const loadMoreBtn = document.getElementById("loadMoreBtn");
       const searchCurrentProjectOnly = document.getElementById("searchCurrentProjectOnly");
 
       // 应用状态
       const state = {
         projects: [],
-        currentProject: "",
+        currentProject: { source: "claude_code", project: "" },
+        currentProjectKey: "",
         sessions: [],
         currentSessionId: "",
         offset: 0,
@@ -188,6 +201,27 @@
         return res.json();
       }
 
+      function sourceLabel(source) {
+        return source === "codex" ? "[Codex]" : "[项目]";
+      }
+
+      function makeProjectKey({ source, project }) {
+        return JSON.stringify({ source: source || "claude_code", project: project || "" });
+      }
+
+      function parseProjectKey(key) {
+        try {
+          const parsed = JSON.parse(key || "{}");
+          return {
+            source: parsed.source || "claude_code",
+            project: parsed.project || "",
+          };
+        } catch {
+          // Fallback for old format
+          return { source: "claude_code", project: key || "" };
+        }
+      }
+
       // 渲染函数
       function renderProjects() {
         projectSelect.innerHTML = "";
@@ -200,11 +234,95 @@
         }
         for (const project of state.projects) {
           const option = document.createElement("option");
-          option.value = project.project;
-          option.textContent = `${project.project} (${project.session_count})`;
+          const src = project.source || "claude_code";
+          option.value = makeProjectKey({ source: src, project: project.project });
+          option.textContent = `${sourceLabel(src)} ${project.project} (${project.session_count})`;
           projectSelect.appendChild(option);
         }
-        projectSelect.value = state.currentProject;
+        projectSelect.value = state.currentProjectKey;
+      }
+
+      /**
+       * 创建会话列表项
+       * 使用 data-* 属性而不是闭包，配合事件委托
+       */
+      function createSessionListItem(session, isActive) {
+        const wrapper = document.createElement("div");
+        wrapper.className =
+          "cursor-pointer rounded-lg border border-slate-200 bg-white p-3 mb-3 shadow-sm hover:border-indigo-300 transition-colors";
+        if (isActive) {
+          wrapper.classList.add("border-indigo-500", "shadow");
+        }
+
+        // 使用 data-* 属性传递数据，配合事件委托
+        wrapper.dataset.action = "open-session";
+        wrapper.dataset.sessionId = session.session_id || "";
+
+        wrapper.innerHTML = `
+          <div class="text-sm font-semibold text-slate-700">${escapeHtml(
+            (session.session_id || "").slice(0, 8)
+          )}</div>
+          <div class="text-xs text-slate-500 mt-1" style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">
+            ${escapeHtml(session.summary || "无摘要")}
+          </div>
+          <div class="mt-2 text-[11px] text-slate-400 flex justify-between">
+            <span>${escapeHtml(session.updated_at || "")}</span>
+            <span>${session.message_count || 0} 条消息</span>
+          </div>
+        `;
+
+        return wrapper;
+      }
+
+      /**
+       * 创建搜索结果卡片
+       * 使用 data-* 属性而不是闭包，配合事件委托
+       */
+      function createSearchResultCard(result) {
+        const card = document.createElement("div");
+        card.className =
+          "rounded-xl border border-slate-200 bg-white p-4 shadow-sm hover:shadow-md transition-shadow";
+
+        const src = result.source || "claude_code";
+        card.innerHTML = `
+          <div class="flex items-center justify-between text-xs text-slate-500">
+            <span class="font-semibold text-slate-700">${escapeHtml(
+              `${sourceLabel(src)} ${result.project}`
+            )}</span>
+            <span>${formatTimestamp(result.timestamp)}</span>
+          </div>
+          <div class="mt-2 text-xs text-slate-400">
+            会话 ${escapeHtml(result.session_id)}
+          </div>
+          <div class="mt-3 text-sm text-slate-800 whitespace-pre-wrap break-words">
+            ${highlight(result.excerpt || "", state.searchQuery)}
+          </div>
+          <div class="mt-3 flex gap-3">
+            <button
+              type="button"
+              class="text-xs font-medium text-indigo-600 hover:text-indigo-800"
+              data-action="jump-to-message"
+              data-session="${escapeHtml(result.session_id)}"
+              data-project="${escapeHtml(result.project)}"
+              data-source="${escapeHtml(src)}"
+              data-timestamp="${escapeHtml(result.timestamp)}"
+            >
+              跳转到消息 →
+            </button>
+            <button
+              type="button"
+              class="text-xs font-medium text-slate-600 hover:text-slate-800"
+              data-action="open-session"
+              data-session="${escapeHtml(result.session_id)}"
+              data-project="${escapeHtml(result.project)}"
+              data-source="${escapeHtml(src)}"
+            >
+              打开会话 →
+            </button>
+          </div>
+        `;
+
+        return card;
       }
 
       function renderSessions() {
@@ -214,32 +332,14 @@
             '<div class="p-4 text-sm text-slate-400">未找到会话</div>';
           return;
         }
+
+        // 使用 DocumentFragment 减少重排重绘
+        const fragment = document.createDocumentFragment();
         for (const session of state.sessions) {
           const isActive = session.session_id === state.currentSessionId;
-          const wrapper = document.createElement("div");
-          wrapper.className =
-            "cursor-pointer rounded-lg border border-slate-200 bg-white p-3 mb-3 shadow-sm hover:border-indigo-300 transition-colors";
-          if (isActive) {
-            wrapper.classList.add("border-indigo-500", "shadow");
-          }
-          wrapper.dataset.sessionId = session.session_id;
-          wrapper.innerHTML = `
-            <div class="text-sm font-semibold text-slate-700">${escapeHtml(
-              session.session_id.slice(0, 8)
-            )}</div>
-            <div class="text-xs text-slate-500 mt-1" style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">
-              ${escapeHtml(session.summary || "无摘要")}
-            </div>
-            <div class="mt-2 text-[11px] text-slate-400 flex justify-between">
-              <span>${escapeHtml(session.updated_at || "")}</span>
-              <span>${session.message_count || 0} 条消息</span>
-            </div>
-          `;
-          wrapper.addEventListener("click", () => {
-            loadSession(session.session_id);
-          });
-          sessionList.appendChild(wrapper);
+          fragment.appendChild(createSessionListItem(session, isActive));
         }
+        sessionList.appendChild(fragment);
       }
 
       function renderSessionMeta() {
@@ -255,6 +355,7 @@
             <span class="font-semibold text-slate-700">${escapeHtml(
               session.session_id
             )}</span>
+            <span>${escapeHtml(sourceLabel(state.currentProject?.source))}</span>
             <span>会话时间: ${formatTimestamp(session.started_at)} ~ ${formatTimestamp(session.updated_at)}</span>
             <span>消息数: ${session.message_count || 0}</span>
             <span>${escapeHtml(session.cwd || "")}</span>
@@ -271,6 +372,101 @@
         } catch {
           return [{ type: "text", text: String(content) }];
         }
+      }
+
+      /**
+       * 解析旧格式的工具调用（Markdown 格式）
+       * 旧格式：**Tool:** `name`\n\n```json\n{...}\n```
+       */
+      function parseLegacyToolCall(markdown) {
+        const text = String(markdown || "");
+        const nameMatch = text.match(/\*\*Tool:\*\*\s*`([^`]+)`/);
+        const name = (nameMatch && nameMatch[1]) ? nameMatch[1] : "工具调用";
+
+        // 提取 JSON 代码块（支持 \n 和 \r\n）
+        const jsonFence = text.match(/```json\s*[\r\n]+([\s\S]*?)[\r\n]+```/);
+        let input = {};
+        if (jsonFence && jsonFence[1]) {
+          const raw = jsonFence[1].trim();
+          if (raw) {
+            try {
+              input = JSON.parse(raw);
+            } catch {
+              input = { _raw: raw };
+            }
+          }
+        } else {
+          input = { _raw: text };
+        }
+
+        return { type: "tool_use", name, input };
+      }
+
+      /**
+       * 解析旧格式的工具输出（Markdown 格式）
+       * 旧格式：```json\n{...}\n``` 或 ```\n...\n```
+       */
+      function parseLegacyToolOutput(markdown) {
+        const text = String(markdown || "");
+
+        // 优先尝试 JSON 代码块（支持 \n 和 \r\n）
+        const jsonFence = text.match(/```json\s*[\r\n]+([\s\S]*?)[\r\n]+```/);
+        if (jsonFence && jsonFence[1]) {
+          const raw = jsonFence[1].trim();
+          if (!raw) return { type: "tool_result", content: "" };
+          try {
+            return { type: "tool_result", content: JSON.parse(raw) };
+          } catch {
+            return { type: "tool_result", content: raw };
+          }
+        }
+
+        // 其次尝试普通代码块（支持 \n 和 \r\n）
+        const anyFence = text.match(/```\s*[\r\n]+([\s\S]*?)[\r\n]+```/);
+        if (anyFence && anyFence[1]) {
+          return { type: "tool_result", content: anyFence[1].trim() };
+        }
+
+        return { type: "tool_result", content: text };
+      }
+
+      /**
+       * 获取消息的内容块（统一新旧格式）
+       *
+       * 优先使用新的 blocks 字段，如果不存在则解析 content 字段。
+       * 同时处理旧的事件级类型（reasoning/tool_call/tool_output）。
+       */
+      function getItemBlocks(item) {
+        // 优先使用新的 blocks 字段
+        if (item && Array.isArray(item.blocks)) {
+          return item.blocks;
+        }
+
+        // 解析 content 字段
+        const blocks = parseContent(item ? item.content : "");
+
+        // 向后兼容：将旧的事件级类型转换为统一的 blocks
+        if (item && item.type === "reasoning") {
+          // reasoning 类型：提取文本内容并转换为 thinking block
+          const thinking = blocks
+            .map((b) => (b && typeof b === "object" && b.type === "text" ? (b.text || "") : ""))
+            .filter(Boolean)
+            .join("\n")
+            .trim();
+          return thinking ? [{ type: "thinking", thinking }] : blocks;
+        }
+
+        if (item && item.type === "tool_call") {
+          // tool_call 类型：解析 Markdown 格式的工具调用
+          return [parseLegacyToolCall(item.content)];
+        }
+
+        if (item && item.type === "tool_output") {
+          // tool_output 类型：解析 Markdown 格式的工具输出
+          return [parseLegacyToolOutput(item.content)];
+        }
+
+        return blocks;
       }
 
       function formatJsonForDisplay(obj) {
@@ -337,6 +533,24 @@
             bubbleClass: "bg-emerald-50 border-emerald-200",
           };
         }
+        if (type === "tool_call") {
+          return {
+            badgeClass: "bg-purple-600 text-white",
+            bubbleClass: "bg-purple-50 border-purple-200",
+          };
+        }
+        if (type === "tool_output" || role === "tool") {
+          return {
+            badgeClass: "bg-amber-600 text-white",
+            bubbleClass: "bg-amber-50 border-amber-200",
+          };
+        }
+        if (type === "reasoning") {
+          return {
+            badgeClass: "bg-slate-600 text-white",
+            bubbleClass: "bg-slate-50 border-slate-200",
+          };
+        }
         return {
           badgeClass: "bg-slate-200 text-slate-600",
           bubbleClass: "bg-white border-slate-200",
@@ -371,7 +585,9 @@
       }
 
       function formatToolResultContent(block) {
-        const content = block.content || block;
+        // 使用 in 操作符检查 content 字段是否存在，而不是用 || 判断
+        // 这样可以正确处理空字符串、0、false 等 falsy 值
+        const content = "content" in block ? block.content : block;
         if (typeof content === "string") {
           try {
             return formatJsonForDisplay(JSON.parse(content));
@@ -387,23 +603,17 @@
         const isLong = displayContent.length > 2000;
         const bodyHtml = renderCodeBlock(displayContent, isLong ? "max-h-96" : "max-h-60");
 
-        if (isLong) {
-          return renderCollapsible({
-            bgClass: "bg-green-50",
-            borderClass: "border-green-200",
-            summaryClass: "text-green-700",
-            summary: `✓ 工具结果 (${displayContent.length} 字符，点击展开)`,
-            bodyHtml,
-          });
-        }
-
-        return renderPanel({
-          bgClass: "bg-green-50",
-          borderClass: "border-green-200",
-          titleClass: "text-green-700",
-          title: "✓ 工具结果",
-          bodyHtml,
-        });
+        // 统一使用 <details>/<summary> 折叠组件
+        // 短内容默认展开（open 属性），长内容默认折叠
+        const openAttr = isLong ? "" : " open";
+        return `
+          <details class="mt-2 rounded-lg bg-green-50 border border-green-200 p-3"${openAttr}>
+            <summary class="cursor-pointer text-xs font-semibold text-green-700 select-none">
+              ✓ 工具结果 (${displayContent.length} 字符，点击${isLong ? "展开" : "折叠"})
+            </summary>
+            ${bodyHtml}
+          </details>
+        `;
       }
 
       const contentRenderers = {
@@ -430,13 +640,19 @@
           });
         },
         text: (block) => renderTextBlock(block.text),
-        tool_use: (block) => renderPanel({
-          bgClass: "bg-blue-50",
-          borderClass: "border-blue-200",
-          titleClass: "text-blue-700",
-          title: `🔧 ${escapeHtml(block.name || "工具调用")}`,
-          bodyHtml: renderCodeBlock(formatJsonForDisplay(block.input || {})),
-        }),
+        tool_use: (block) => {
+          // 工具调用默认展开（因为通常内容不长）
+          const inputJson = formatJsonForDisplay(block.input || {});
+          const bodyHtml = renderCodeBlock(inputJson);
+          return `
+            <details class="mt-2 rounded-lg bg-blue-50 border border-blue-200 p-3" open>
+              <summary class="cursor-pointer text-xs font-semibold text-blue-700 select-none">
+                🔧 ${escapeHtml(block.name || "工具调用")}（点击折叠）
+              </summary>
+              ${bodyHtml}
+            </details>
+          `;
+        },
         tool_result: renderToolResult,
       };
 
@@ -478,13 +694,18 @@
             wrapper.id = `msg-${item.timestamp}`;
           }
 
-          const contentBlocks = parseContent(item.content);
-          const contentHtml = contentBlocks.map(block => renderContentBlock(block)).join("");
+          // 使用统一的 getItemBlocks() 获取内容块（支持新旧格式）
+          const contentBlocks = getItemBlocks(item);
+          const contentHtml = contentBlocks.map((block) => renderContentBlock(block)).join("");
 
+          // 确定显示标签
+          let displayLabel = role;
+
+          // 统一的卡片结构：所有折叠交互都由内容块的 <details>/<summary> 承担
           wrapper.innerHTML = `
             <div class="flex items-center justify-between">
               <span class="rounded-full px-2 py-1 text-xs font-semibold ${badgeClass}">
-                ${escapeHtml(role)}
+                ${escapeHtml(displayLabel)}
               </span>
               <span class="text-xs text-slate-400">
                 ${formatTimestamp(item.timestamp)}
@@ -507,72 +728,28 @@
             '<div class="text-sm text-slate-400">未找到结果</div>';
           return;
         }
+
+        // 使用 DocumentFragment 减少重排重绘
+        const fragment = document.createDocumentFragment();
         for (const result of results) {
-          const card = document.createElement("div");
-          card.className =
-            "rounded-xl border border-slate-200 bg-white p-4 shadow-sm hover:shadow-md transition-shadow";
-          card.innerHTML = `
-            <div class="flex items-center justify-between text-xs text-slate-500">
-              <span class="font-semibold text-slate-700">${escapeHtml(
-                result.project
-              )}</span>
-              <span>${formatTimestamp(result.timestamp)}</span>
-            </div>
-            <div class="mt-2 text-xs text-slate-400">
-              会话 ${escapeHtml(result.session_id)}
-            </div>
-            <div class="mt-3 text-sm text-slate-800 whitespace-pre-wrap break-words">
-              ${highlight(result.excerpt || "", state.searchQuery)}
-            </div>
-            <div class="mt-3 flex gap-3">
-              <button
-                class="jump-to-message text-xs font-medium text-indigo-600 hover:text-indigo-800"
-                data-session="${escapeHtml(result.session_id)}"
-                data-project="${escapeHtml(result.project)}"
-                data-timestamp="${escapeHtml(result.timestamp)}"
-              >
-                跳转到消息 →
-              </button>
-              <button
-                class="open-session text-xs font-medium text-slate-600 hover:text-slate-800"
-                data-session="${escapeHtml(result.session_id)}"
-                data-project="${escapeHtml(result.project)}"
-              >
-                打开会话 →
-              </button>
-            </div>
-          `;
-
-          card.querySelector(".jump-to-message").addEventListener("click", () => {
-            openSessionFromSearch({
-              sessionId: result.session_id,
-              project: result.project,
-              timestamp: result.timestamp,
-            }).catch(console.error);
-          });
-
-          card.querySelector(".open-session").addEventListener("click", () => {
-            openSessionFromSearch({
-              sessionId: result.session_id,
-              project: result.project,
-            }).catch(console.error);
-          });
-
-          searchResults.appendChild(card);
+          fragment.appendChild(createSearchResultCard(result));
         }
+        searchResults.appendChild(fragment);
       }
 
       function isSearchView() {
         return !searchResults.classList.contains("hidden");
       }
 
-      async function ensureProjectLoaded(project) {
-        if (project === state.currentProject) {
+      async function ensureProjectLoaded(projectObj) {
+        const key = makeProjectKey(projectObj);
+        if (key === state.currentProjectKey) {
           return;
         }
-        state.currentProject = project;
-        projectSelect.value = project;
-        await loadSessions(project);
+        state.currentProject = projectObj;
+        state.currentProjectKey = key;
+        projectSelect.value = key;
+        await loadSessions(projectObj);
       }
 
       function scrollToMessage(timestamp) {
@@ -591,8 +768,8 @@
         }, 100);
       }
 
-      async function openSessionFromSearch({ sessionId, project, timestamp }) {
-        await ensureProjectLoaded(project);
+      async function openSessionFromSearch({ sessionId, project, source, timestamp }) {
+        await ensureProjectLoaded({ source: source || "claude_code", project });
         await loadSession(sessionId);
         showSessionView();
         if (timestamp) {
@@ -620,16 +797,23 @@
       async function loadProjects() {
         const data = await api("/api/projects");
         state.projects = data.projects || [];
-        state.currentProject = state.projects[0]?.project || "";
+        const first = state.projects[0] || {};
+        state.currentProject = {
+          source: first.source || "claude_code",
+          project: first.project || "",
+        };
+        state.currentProjectKey = makeProjectKey(state.currentProject);
         renderProjects();
-        if (state.currentProject) {
+        if (state.currentProject.project) {
           await loadSessions(state.currentProject);
         }
       }
 
-      async function loadSessions(project) {
+      async function loadSessions(projectObj) {
+        const source = projectObj?.source || "claude_code";
+        const project = projectObj?.project || "";
         const data = await api(
-          `/api/projects/${encodeURIComponent(project)}/sessions`
+          `/api/projects/${encodeURIComponent(project)}/sessions?source=${encodeURIComponent(source)}`
         );
         state.sessions = data.sessions || [];
         state.currentSessionId = state.sessions[0]?.session_id || "";
@@ -649,9 +833,11 @@
         if (!append) {
           state.offset = 0;
         }
+        const source = state.currentProject?.source || "claude_code";
+        const project = state.currentProject?.project || "";
         const path = `/api/sessions/${encodeURIComponent(
           sessionId
-        )}?project=${encodeURIComponent(state.currentProject)}&offset=${
+        )}?project=${encodeURIComponent(project)}&source=${encodeURIComponent(source)}&offset=${
           state.offset
         }&limit=${state.limit}`;
         const data = await api(path);
@@ -683,9 +869,12 @@
         }
 
         let path = `/api/search?q=${encodeURIComponent(query)}&offset=${state.searchOffset}&limit=50`;
-        // 只有勾选了"仅当前项目"且 currentProject 存在时才添加 project 参数
-        if (searchCurrentProjectOnly.checked && state.currentProject) {
-          path += `&project=${encodeURIComponent(state.currentProject)}`;
+        // 只有勾选了"仅当前项目"且 currentProject.project 存在时才添加 project/source 参数
+        if (searchCurrentProjectOnly.checked && state.currentProject?.project) {
+          path += `&project=${encodeURIComponent(state.currentProject.project)}`;
+          path += `&source=${encodeURIComponent(state.currentProject.source || "claude_code")}`;
+        } else if (searchSource.value) {
+          path += `&source=${encodeURIComponent(searchSource.value)}`;
         }
         try {
           const data = await api(path);
@@ -709,9 +898,41 @@
 
       // 事件监听
       projectSelect.addEventListener("change", async (event) => {
-        state.currentProject = event.target.value;
+        state.currentProjectKey = event.target.value;
+        state.currentProject = parseProjectKey(state.currentProjectKey);
         state.offset = 0;
         await loadSessions(state.currentProject);
+      });
+
+      // 事件委托：会话列表点击（替代逐条 addEventListener）
+      sessionList.addEventListener("click", (event) => {
+        const target = event.target.closest('[data-action="open-session"][data-session-id]');
+        if (!target || !sessionList.contains(target)) return;
+        const sessionId = target.dataset.sessionId || "";
+        if (!sessionId) return;
+        loadSession(sessionId).catch(console.error);
+      });
+
+      // 事件委托：搜索结果点击（替代逐条 addEventListener）
+      searchResults.addEventListener("click", (event) => {
+        const btn = event.target.closest("button[data-action]");
+        if (!btn || !searchResults.contains(btn)) return;
+
+        const action = btn.dataset.action || "";
+        const sessionId = btn.dataset.session || "";
+        const project = btn.dataset.project || "";
+        const source = btn.dataset.source || "";
+        const timestamp = btn.dataset.timestamp || "";
+
+        if (!sessionId || !project) return;
+
+        if (action === "jump-to-message") {
+          openSessionFromSearch({ sessionId, project, source, timestamp }).catch(console.error);
+          return;
+        }
+        if (action === "open-session") {
+          openSessionFromSearch({ sessionId, project, source }).catch(console.error);
+        }
       });
 
       searchBtn.addEventListener("click", runSearch);
