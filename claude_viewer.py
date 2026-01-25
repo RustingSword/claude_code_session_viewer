@@ -712,6 +712,9 @@ def init_db(conn: sqlite3.Connection) -> None:
         # 检查是否有 source 字段
         if "source" not in schema_sql:
             needs_migration = True
+        # 检查是否有 parent_session_id 字段
+        elif "parent_session_id" not in schema_sql:
+            needs_rebuild = True
         # 检查主键是否正确
         elif "PRIMARY KEY (source, project, session_id)" not in schema_sql:
             needs_rebuild = True
@@ -757,6 +760,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             summary TEXT,
             cwd TEXT,
             git_branch TEXT,
+            parent_session_id TEXT,
             PRIMARY KEY (source, project, session_id)
         )
         """
@@ -816,6 +820,7 @@ def _migrate_db_add_source(conn: sqlite3.Connection) -> None:
                 summary TEXT,
                 cwd TEXT,
                 git_branch TEXT,
+                parent_session_id TEXT,
                 PRIMARY KEY (source, project, session_id)
             )
             """
@@ -824,10 +829,10 @@ def _migrate_db_add_source(conn: sqlite3.Connection) -> None:
             """
             INSERT INTO sessions_new (
                 source, session_id, project, file_path, started_at, updated_at,
-                message_count, summary, cwd, git_branch
+                message_count, summary, cwd, git_branch, parent_session_id
             )
             SELECT 'claude_code', session_id, project, file_path, started_at, updated_at,
-                   message_count, summary, cwd, git_branch
+                   message_count, summary, cwd, git_branch, NULL
             FROM sessions
             """
         )
@@ -1146,20 +1151,30 @@ def parse_event_line(line: str, session_id: str, source: str) -> Optional[Normal
     return parser.parse_raw(raw, session_id, event_id=event_id)
 
 
-def scan_session_files() -> Iterable[tuple[str, str, Path]]:
+def scan_session_files() -> Iterable[tuple[str, str, Path, Optional[str]]]:
     """扫描 Claude Code 和 Codex session 文件
 
-    返回 (source, project, path) 三元组。
+    返回 (source, project, path, parent_session_id) 四元组。
     - Claude Code: project = 目录名
     - Codex: project = YYYY-MM-DD（从路径提取）
+    - parent_session_id: 父会话 ID（主会话为 None，子会话为父会话的 session_id）
     """
     # Claude Code sessions
     if CLAUDE_PROJECTS_DIR.exists():
         for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
             if not project_dir.is_dir():
                 continue
+            # 扫描主会话文件
             for path in project_dir.glob("*.jsonl"):
-                yield ("claude_code", project_dir.name, path)
+                yield ("claude_code", project_dir.name, path, None)
+
+                # 检查是否有 subagents 子目录
+                session_dir = project_dir / path.stem
+                subagents_dir = session_dir / "subagents"
+                if subagents_dir.exists() and subagents_dir.is_dir():
+                    # 扫描子会话文件
+                    for subagent_path in subagents_dir.glob("*.jsonl"):
+                        yield ("claude_code", project_dir.name, subagent_path, path.stem)
 
     # Codex sessions
     if CODEX_SESSIONS_DIR.exists():
@@ -1175,7 +1190,7 @@ def scan_session_files() -> Iterable[tuple[str, str, Path]]:
                 project = (
                     datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
                 )
-            yield ("codex", project, path)
+            yield ("codex", project, path, None)
 
 
 def remove_file_records(conn: sqlite3.Connection, file_path: str) -> None:
@@ -1193,7 +1208,7 @@ def remove_file_records(conn: sqlite3.Connection, file_path: str) -> None:
     conn.execute("DELETE FROM files WHERE file_path = ?", (file_path,))
 
 
-def index_file(conn: sqlite3.Connection, source: str, project: str, path: Path) -> None:
+def index_file(conn: sqlite3.Connection, source: str, project: str, path: Path, parent_session_id: Optional[str] = None) -> None:
     """索引单个会话文件"""
     session_id = path.stem
     path_str = str(path)
@@ -1314,8 +1329,9 @@ def index_file(conn: sqlite3.Connection, source: str, project: str, path: Path) 
             message_count,
             summary,
             cwd,
-            git_branch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            git_branch,
+            parent_session_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             source,
@@ -1328,6 +1344,7 @@ def index_file(conn: sqlite3.Connection, source: str, project: str, path: Path) 
             summary,
             cwd,
             git_branch,
+            parent_session_id,
         ),
     )
 
@@ -1373,7 +1390,7 @@ def ensure_index(conn: sqlite3.Connection) -> None:
 
         # 扫描当前文件
         current_paths: set[str] = set()
-        for source, project, path in scan_session_files():
+        for source, project, path, parent_session_id in scan_session_files():
             path_str = str(path)
             mtime = path.stat().st_mtime
             current_paths.add(path_str)
@@ -1381,7 +1398,7 @@ def ensure_index(conn: sqlite3.Connection) -> None:
             # 如果文件是新的或已更新，重新索引
             row = existing.get(path_str)
             if row is None or row["mtime"] < mtime:
-                index_file(conn, source, project, path)
+                index_file(conn, source, project, path, parent_session_id)
 
         # 删除已不存在的文件记录
         for file_path, row in existing.items():
@@ -1456,7 +1473,8 @@ def list_sessions(project: str, source: str = Query(DEFAULT_SOURCE)) -> Dict[str
                    message_count,
                    summary,
                    cwd,
-                   git_branch
+                   git_branch,
+                   parent_session_id
             FROM sessions
             WHERE source = ? AND project = ?
             ORDER BY updated_at DESC
@@ -1464,6 +1482,48 @@ def list_sessions(project: str, source: str = Query(DEFAULT_SOURCE)) -> Dict[str
             (source, project),
         ).fetchall()
         return {"source": source, "project": project, "sessions": [dict(row) for row in rows]}
+
+
+@app.get("/api/sessions/{session_id}/subagents")
+def list_subagents(
+    session_id: str,
+    project: Optional[str] = None,
+    source: str = Query(DEFAULT_SOURCE),
+) -> Dict[str, Any]:
+    """列出会话的所有子会话"""
+    with indexed_db_session() as conn:
+        # 首先验证父会话存在
+        parent_row = resolve_session_row(conn, session_id, project, source)
+        if not parent_row:
+            raise HTTPException(status_code=404, detail="Parent session not found")
+
+        resolved_source = parent_row["source"]
+        resolved_project = parent_row["project"]
+
+        # 查询子会话
+        rows = conn.execute(
+            """
+            SELECT session_id,
+                   started_at,
+                   updated_at,
+                   message_count,
+                   summary,
+                   cwd,
+                   git_branch,
+                   parent_session_id
+            FROM sessions
+            WHERE source = ? AND project = ? AND parent_session_id = ?
+            ORDER BY updated_at DESC
+            """,
+            (resolved_source, resolved_project, session_id),
+        ).fetchall()
+
+        return {
+            "source": resolved_source,
+            "project": resolved_project,
+            "parent_session_id": session_id,
+            "subagents": [dict(row) for row in rows],
+        }
 
 
 def resolve_session_row(
