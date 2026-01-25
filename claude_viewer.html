@@ -16,12 +16,13 @@
       .markdown-content h1 { font-size: 1.5em; font-weight: bold; margin: 0.5em 0; }
       .markdown-content h2 { font-size: 1.3em; font-weight: bold; margin: 0.5em 0; }
       .markdown-content h3 { font-size: 1.1em; font-weight: bold; margin: 0.5em 0; }
-      .markdown-content code { background: #f1f5f9; padding: 0.2em 0.4em; border-radius: 3px; font-family: monospace; }
+      .markdown-content code { background: #f1f5f9; padding: 0.2em 0.4em; border-radius: 3px; font-family: monospace; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
       .markdown-content pre { background: #f1f5f9; padding: 1em; border-radius: 6px; overflow-x: auto; }
       .markdown-content pre code { background: none; padding: 0; }
       .markdown-content ul { list-style: disc; margin-left: 1.5em; }
       .markdown-content ol { list-style: decimal; margin-left: 1.5em; }
       .markdown-content a { color: #3b82f6; text-decoration: underline; }
+      .markdown-content { overflow-wrap: anywhere; }
 
       /* 改进 pre 标签的文本换行 */
       pre {
@@ -40,7 +41,7 @@
   <body class="bg-slate-50 text-slate-900">
     <div class="flex h-screen">
       <!-- 左侧边栏 -->
-      <aside class="w-80 border-r bg-white flex flex-col">
+      <aside class="w-80 shrink-0 border-r bg-white flex flex-col">
         <div class="p-5 border-b">
           <div class="text-lg font-semibold">Claude / Codex 会话查看器</div>
           <div class="text-xs text-slate-500 mt-1">
@@ -55,11 +56,11 @@
         <div class="px-5 pt-4 text-xs uppercase text-slate-400 tracking-wider">
           会话列表
         </div>
-        <div id="sessionList" class="flex-1 overflow-y-auto px-3 pb-4"></div>
+        <div id="sessionList" class="flex-1 overflow-y-scroll px-3 pb-4"></div>
       </aside>
 
       <!-- 主内容区 -->
-      <main class="flex-1 flex flex-col">
+      <main class="flex-1 min-w-0 flex flex-col">
         <!-- 搜索栏 -->
         <div class="border-b bg-white p-5">
           <div class="flex items-center gap-3">
@@ -101,7 +102,7 @@
         </div>
 
         <!-- 消息列表 -->
-        <div class="flex-1 overflow-y-auto p-6">
+        <div class="flex-1 min-w-0 overflow-y-auto p-6">
           <div id="sessionMeta" class="mb-4 text-sm text-slate-500"></div>
           <div id="messageList" class="space-y-4"></div>
 
@@ -148,6 +149,7 @@
         searchOffset: 0,
         searchHasMore: false,
         searchTotal: 0,
+        expandedSessions: new Set(), // 跟踪展开的主会话ID
       };
 
       // 工具函数
@@ -245,32 +247,62 @@
       /**
        * 创建会话列表项
        * 使用 data-* 属性而不是闭包，配合事件委托
+       * @param {Object} session - 会话对象
+       * @param {boolean} isActive - 是否为当前激活会话
+       * @param {boolean} isSubagent - 是否为子会话
+       * @param {boolean} hasSubagents - 是否有子会话
+       * @param {boolean} isExpanded - 子会话是否展开
        */
-      function createSessionListItem(session, isActive) {
+      function createSessionListItem(session, isActive, isSubagent = false, hasSubagents = false, isExpanded = false) {
         const wrapper = document.createElement("div");
-        wrapper.className =
-          "cursor-pointer rounded-lg border border-slate-200 bg-white p-3 mb-3 shadow-sm hover:border-indigo-300 transition-colors";
+
+        // 基础样式
+        let wrapperClass = "rounded-lg border border-slate-200 bg-white mb-3 shadow-sm transition-colors";
+
+        // 子会话样式：缩进和不同的视觉效果
+        if (isSubagent) {
+          wrapperClass = "ml-6 rounded-lg border border-slate-200 bg-slate-50 mb-2 shadow-sm transition-colors";
+        }
+
+        wrapper.className = wrapperClass;
+
         if (isActive) {
           wrapper.classList.add("border-indigo-500", "shadow");
         }
 
-        // 使用 data-* 属性传递数据，配合事件委托
-        wrapper.dataset.action = "open-session";
-        wrapper.dataset.sessionId = session.session_id || "";
+        // 主会话区域（可点击打开会话）
+        const mainArea = document.createElement("div");
+        mainArea.className = "cursor-pointer p-3 hover:bg-slate-50 rounded-lg";
+        mainArea.dataset.action = "open-session";
+        mainArea.dataset.sessionId = session.session_id || "";
 
-        wrapper.innerHTML = `
-          <div class="text-sm font-semibold text-slate-700">${escapeHtml(
-            (session.session_id || "").slice(0, 8)
-          )}</div>
-          <div class="text-xs text-slate-500 mt-1" style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">
-            ${escapeHtml(session.summary || "无摘要")}
-          </div>
-          <div class="mt-2 text-[11px] text-slate-400 flex justify-between">
-            <span>${escapeHtml(session.updated_at || "")}</span>
-            <span>${session.message_count || 0} 条消息</span>
+        // 构建会话信息HTML
+        const sessionIdDisplay = escapeHtml((session.session_id || "").slice(0, 8));
+        const subagentIcon = isSubagent ? '<span class="text-slate-400 mr-1">↳</span>' : '';
+
+        // 只对主会话保留按钮槽位；子会话不需要
+        const toggleSlotHtml = isSubagent ? "" : `<div class="ml-2 w-6 h-6 flex items-center justify-center flex-shrink-0">${hasSubagents ? `<button type="button" class="w-6 h-6 hover:bg-slate-200 rounded transition-colors" data-action="toggle-subagents" data-session-id="${escapeHtml(session.session_id || "")}" aria-label="展开/折叠子会话"><span class="inline-block w-4 text-center text-slate-600 text-sm">${isExpanded ? '▼' : '▶'}</span></button>` : ""}</div>`;
+
+        mainArea.innerHTML = `
+          <div class="flex items-start">
+            <div class="flex-1 min-w-0">
+              <div class="text-sm font-semibold text-slate-700 flex items-center">
+                ${subagentIcon}${sessionIdDisplay}
+                ${isSubagent ? '<span class="ml-2 text-[10px] px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded">子会话</span>' : ''}
+              </div>
+              <div class="text-xs text-slate-500 mt-1" style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">
+                ${escapeHtml(session.summary || "无摘要")}
+              </div>
+              <div class="mt-2 text-[11px] text-slate-400 flex justify-between">
+                <span>${escapeHtml(session.updated_at || "")}</span>
+                <span>${session.message_count || 0} 条消息</span>
+              </div>
+            </div>
+            ${toggleSlotHtml}
           </div>
         `;
 
+        wrapper.appendChild(mainArea);
         return wrapper;
       }
 
@@ -325,6 +357,44 @@
         return card;
       }
 
+      /**
+       * 构建会话树形结构
+       * @param {Array} sessions - 扁平的会话列表
+       * @returns {Array} 树形结构的会话列表
+       */
+      function buildSessionTree(sessions) {
+        const tree = [];
+        const sessionMap = new Map();
+
+        // 第一遍：建立映射
+        for (const session of sessions) {
+          sessionMap.set(session.session_id, {
+            ...session,
+            subagents: []
+          });
+        }
+
+        // 第二遍：构建树形结构
+        for (const session of sessions) {
+          const node = sessionMap.get(session.session_id);
+          if (session.parent_session_id) {
+            // 这是子会话，添加到父会话的 subagents 数组
+            const parent = sessionMap.get(session.parent_session_id);
+            if (parent) {
+              parent.subagents.push(node);
+            } else {
+              // 父会话不存在（可能被过滤掉了），作为顶层会话处理
+              tree.push(node);
+            }
+          } else {
+            // 这是主会话，添加到顶层
+            tree.push(node);
+          }
+        }
+
+        return tree;
+      }
+
       function renderSessions() {
         sessionList.innerHTML = "";
         if (!state.sessions.length) {
@@ -333,12 +403,33 @@
           return;
         }
 
+        // 构建树形结构
+        const sessionTree = buildSessionTree(state.sessions);
+
         // 使用 DocumentFragment 减少重排重绘
         const fragment = document.createDocumentFragment();
-        for (const session of state.sessions) {
+
+        for (const session of sessionTree) {
           const isActive = session.session_id === state.currentSessionId;
-          fragment.appendChild(createSessionListItem(session, isActive));
+          const hasSubagents = session.subagents && session.subagents.length > 0;
+          const isExpanded = state.expandedSessions.has(session.session_id);
+
+          // 渲染主会话
+          fragment.appendChild(
+            createSessionListItem(session, isActive, false, hasSubagents, isExpanded)
+          );
+
+          // 如果有子会话且已展开，渲染子会话
+          if (hasSubagents && isExpanded) {
+            for (const subagent of session.subagents) {
+              const isSubActive = subagent.session_id === state.currentSessionId;
+              fragment.appendChild(
+                createSessionListItem(subagent, isSubActive, true, false, false)
+              );
+            }
+          }
         }
+
         sessionList.appendChild(fragment);
       }
 
@@ -816,6 +907,18 @@
           `/api/projects/${encodeURIComponent(project)}/sessions?source=${encodeURIComponent(source)}`
         );
         state.sessions = data.sessions || [];
+
+        // 默认展开所有有子会话的主会话
+        for (const session of state.sessions) {
+          if (!session.parent_session_id) {
+            // 检查是否有子会话
+            const hasSubagents = state.sessions.some(s => s.parent_session_id === session.session_id);
+            if (hasSubagents) {
+              state.expandedSessions.add(session.session_id);
+            }
+          }
+        }
+
         state.currentSessionId = state.sessions[0]?.session_id || "";
         renderSessions();
         renderSessionMeta();
@@ -906,6 +1009,25 @@
 
       // 事件委托：会话列表点击（替代逐条 addEventListener）
       sessionList.addEventListener("click", (event) => {
+        // 处理展开/折叠按钮点击
+        const toggleBtn = event.target.closest('[data-action="toggle-subagents"]');
+        if (toggleBtn && sessionList.contains(toggleBtn)) {
+          event.stopPropagation(); // 阻止事件冒泡到打开会话的处理器
+          const sessionId = toggleBtn.dataset.sessionId || "";
+          if (sessionId) {
+            // 切换展开状态
+            if (state.expandedSessions.has(sessionId)) {
+              state.expandedSessions.delete(sessionId);
+            } else {
+              state.expandedSessions.add(sessionId);
+            }
+            // 重新渲染会话列表
+            renderSessions();
+          }
+          return;
+        }
+
+        // 处理打开会话点击
         const target = event.target.closest('[data-action="open-session"][data-session-id]');
         if (!target || !sessionList.contains(target)) return;
         const sessionId = target.dataset.sessionId || "";
