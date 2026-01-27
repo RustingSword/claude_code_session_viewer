@@ -1369,14 +1369,19 @@ def index_file(conn: sqlite3.Connection, source: str, project: str, path: Path, 
     )
 
 
-def ensure_index(conn: sqlite3.Connection) -> None:
-    """确保索引是最新的（增量更新，带节流）"""
+def ensure_index(conn: sqlite3.Connection, force: bool = False) -> None:
+    """确保索引是最新的（增量更新，带节流）
+
+    Args:
+        conn: 数据库连接
+        force: 是否强制刷新，跳过节流检查
+    """
     global LAST_INDEX_TIME
 
     with INDEX_LOCK:
-        # 索引节流：如果最近刚索引过，跳过
+        # 索引节流：如果最近刚索引过，跳过（除非强制刷新）
         current_time = time.time()
-        if current_time - LAST_INDEX_TIME < INDEX_THROTTLE_SECONDS:
+        if not force and current_time - LAST_INDEX_TIME < INDEX_THROTTLE_SECONDS:
             return
 
         LAST_INDEX_TIME = current_time
@@ -1409,10 +1414,14 @@ def ensure_index(conn: sqlite3.Connection) -> None:
 
 
 @contextmanager
-def indexed_db_session() -> Generator[sqlite3.Connection, None, None]:
-    """数据库连接上下文管理器（确保索引最新）"""
+def indexed_db_session(force_refresh: bool = False) -> Generator[sqlite3.Connection, None, None]:
+    """数据库连接上下文管理器（确保索引最新）
+
+    Args:
+        force_refresh: 是否强制刷新索引，跳过节流检查
+    """
     with db_session() as conn:
-        ensure_index(conn)
+        ensure_index(conn, force=force_refresh)
         yield conn
 
 
@@ -1462,9 +1471,19 @@ def list_projects() -> Dict[str, Any]:
 
 
 @app.get("/api/projects/{project}/sessions")
-def list_sessions(project: str, source: str = Query(DEFAULT_SOURCE)) -> Dict[str, Any]:
-    """列出项目的所有会话"""
-    with indexed_db_session() as conn:
+def list_sessions(
+    project: str,
+    source: str = Query(DEFAULT_SOURCE),
+    force_refresh: bool = Query(False)
+) -> Dict[str, Any]:
+    """列出项目的所有会话
+
+    Args:
+        project: 项目名称
+        source: 数据源（claude_code 或 codex）
+        force_refresh: 是否强制刷新索引（跳过30秒节流限制）
+    """
+    with indexed_db_session(force_refresh=force_refresh) as conn:
         rows = conn.execute(
             """
             SELECT session_id,

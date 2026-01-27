@@ -61,49 +61,54 @@
 
       <!-- 主内容区 -->
       <main class="flex-1 min-w-0 flex flex-col">
-        <!-- 搜索栏 -->
-        <div class="border-b bg-white p-5">
-          <div class="flex items-center gap-3">
-            <input
-              id="searchInput"
-              type="text"
-              placeholder="搜索消息内容..."
-              class="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
-            <label class="flex items-center gap-2 text-sm text-slate-600">
-              <span>类型</span>
-              <select
-                id="searchSource"
-                class="rounded-lg border border-slate-200 px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        <!-- 固定顶部区域 -->
+        <div class="flex-shrink-0 bg-white">
+          <!-- 搜索栏 -->
+          <div class="border-b p-5">
+            <div class="flex items-center gap-3">
+              <input
+                id="searchInput"
+                type="text"
+                placeholder="搜索消息内容..."
+                class="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+              <label class="flex items-center gap-2 text-sm text-slate-600">
+                <span>类型</span>
+                <select
+                  id="searchSource"
+                  class="rounded-lg border border-slate-200 px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option value="">全部</option>
+                  <option value="claude_code">Claude Code</option>
+                  <option value="codex">Codex</option>
+                </select>
+              </label>
+              <label class="flex items-center gap-2 text-sm text-slate-600">
+                <input type="checkbox" id="searchCurrentProjectOnly" class="rounded" />
+                <span>仅当前项目</span>
+              </label>
+              <button
+                id="searchBtn"
+                class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
               >
-                <option value="">全部</option>
-                <option value="claude_code">Claude Code</option>
-                <option value="codex">Codex</option>
-              </select>
-            </label>
-            <label class="flex items-center gap-2 text-sm text-slate-600">
-              <input type="checkbox" id="searchCurrentProjectOnly" class="rounded" />
-              <span>仅当前项目</span>
-            </label>
-            <button
-              id="searchBtn"
-              class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
-            >
-              搜索
-            </button>
-            <button
-              id="clearSearchBtn"
-              class="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
-            >
-              清除
-            </button>
+                搜索
+              </button>
+              <button
+                id="clearSearchBtn"
+                class="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+              >
+                清除
+              </button>
+            </div>
+            <div id="searchMeta" class="mt-2 text-xs text-slate-500"></div>
           </div>
-          <div id="searchMeta" class="mt-2 text-xs text-slate-500"></div>
+
+          <!-- 会话元信息 -->
+          <div id="sessionMeta" class="border-b p-4 text-sm text-slate-500"></div>
         </div>
 
-        <!-- 消息列表 -->
+        <!-- 可滚动消息列表区域 -->
         <div class="flex-1 min-w-0 overflow-y-auto p-6">
-          <div id="sessionMeta" class="mb-4 text-sm text-slate-500"></div>
           <div id="messageList" class="space-y-4"></div>
 
           <!-- 搜索结果 -->
@@ -452,7 +457,7 @@
           (s) => s.session_id === state.currentSessionId
         );
         if (!session) {
-          sessionMeta.textContent = "";
+          sessionMeta.innerHTML = "";
           return;
         }
         sessionMeta.innerHTML = `
@@ -469,10 +474,11 @@
             </div>
             <button
               id="refreshSessionBtn"
-              class="ml-4 px-3 py-1 text-xs font-medium text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 rounded-lg transition-colors whitespace-nowrap flex-shrink-0"
+              class="ml-4 px-3 py-1.5 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors whitespace-nowrap flex-shrink-0 flex items-center gap-1.5"
               title="刷新当前会话"
             >
-              🔄 刷新
+              <span>🔄</span>
+              <span>刷新</span>
             </button>
           </div>
         `;
@@ -1103,14 +1109,16 @@
       sessionMeta.addEventListener("click", async (event) => {
         const refreshBtn = event.target.closest("#refreshSessionBtn");
         if (refreshBtn && sessionMeta.contains(refreshBtn)) {
-          // 保存当前会话ID
+          // 保存当前会话ID和滚动位置
           const currentSessionId = state.currentSessionId;
+          const messageContainer = document.querySelector('.flex-1.min-w-0.overflow-y-auto.p-6');
+          const scrollPosition = messageContainer ? messageContainer.scrollTop : 0;
 
-          // 重新加载会话列表（这会触发后端的索引刷新）
+          // 重新加载会话列表（强制刷新索引）
           const source = state.currentProject?.source || "claude_code";
           const project = state.currentProject?.project || "";
           const data = await api(
-            `/api/projects/${encodeURIComponent(project)}/sessions?source=${encodeURIComponent(source)}`
+            `/api/projects/${encodeURIComponent(project)}/sessions?source=${encodeURIComponent(source)}&force_refresh=true`
           );
           state.sessions = data.sessions || [];
 
@@ -1121,6 +1129,14 @@
           if (currentSessionId) {
             state.currentSessionId = currentSessionId;
             await loadSession(currentSessionId, false);
+
+            // 恢复滚动位置
+            if (messageContainer) {
+              // 使用 setTimeout 确保 DOM 已经更新
+              setTimeout(() => {
+                messageContainer.scrollTop = scrollPosition;
+              }, 0);
+            }
           }
         }
       });
