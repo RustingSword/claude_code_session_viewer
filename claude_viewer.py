@@ -573,7 +573,35 @@ class CodexParser(EventParser):
                     tool_block["id"] = call_id
                 blocks = [tool_block]
 
-            elif payload_type == "function_call_output":
+            elif payload_type == "custom_tool_call":
+                # 关键：将 Codex 的 custom_tool_call 统一为 tool_use block
+                role = "assistant"
+                tool_name = stringify(payload.get("name", "")).strip()
+                call_id = stringify(payload.get("call_id", "")).strip()
+                raw_input = payload.get("input")
+
+                # 解析参数（可能是 dict/list 或字符串）
+                tool_input: Any = {}
+                if isinstance(raw_input, (dict, list)):
+                    tool_input = raw_input
+                else:
+                    input_str = stringify(raw_input or "").strip()
+                    if input_str:
+                        try:
+                            tool_input = json.loads(input_str)
+                        except Exception:
+                            tool_input = {"_raw": input_str}
+
+                tool_block: ToolUseBlock = {
+                    "type": "tool_use",
+                    "name": tool_name or "tool",
+                    "input": tool_input,
+                }
+                if call_id:
+                    tool_block["id"] = call_id
+                blocks = [tool_block]
+
+            elif payload_type in ("function_call_output", "custom_tool_call_output"):
                 # 关键：将 Codex 的 function_call_output 统一为 tool_result block
                 # 保留结构化内容（阶段 1 的修复）
                 role = "tool"

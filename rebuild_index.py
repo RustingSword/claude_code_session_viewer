@@ -36,9 +36,9 @@ def rebuild_database():
     # 重新索引所有文件
     print("重新索引会话文件...")
     total = 0
-    for source, project, path in scan_session_files():
+    for source, project, path, parent_session_id in scan_session_files():
         print(f"  索引: {source}/{project}/{path.name}")
-        index_file(conn, source, project, path)
+        index_file(conn, source, project, path, parent_session_id)
         total += 1
 
     conn.commit()
