@@ -204,7 +204,7 @@
       }
 
       function sourceLabel(source) {
-        return source === "codex" ? "[Codex]" : "[项目]";
+        return source === "codex" ? "[Codex]" : "[Claude Code]";
       }
 
       function makeProjectKey({ source, project }) {
@@ -277,7 +277,21 @@
         mainArea.dataset.sessionId = session.session_id || "";
 
         // 构建会话信息HTML
-        const sessionIdDisplay = escapeHtml((session.session_id || "").slice(0, 8));
+        // 对于codex会话，显示更多信息以便区分
+        let sessionIdDisplay;
+        const fullSessionId = session.session_id || "";
+        if (fullSessionId.startsWith("rollout-")) {
+          // codex会话：显示时间戳部分 (rollout-2026-01-27T06-57-15)
+          const parts = fullSessionId.split("-");
+          if (parts.length >= 5) {
+            sessionIdDisplay = escapeHtml(parts.slice(0, 5).join("-"));
+          } else {
+            sessionIdDisplay = escapeHtml(fullSessionId.slice(0, 30));
+          }
+        } else {
+          // claude code会话：显示前8个字符
+          sessionIdDisplay = escapeHtml(fullSessionId.slice(0, 8));
+        }
         const subagentIcon = isSubagent ? '<span class="text-slate-400 mr-1">↳</span>' : '';
 
         // 只对主会话保留按钮槽位；子会话不需要
@@ -442,15 +456,24 @@
           return;
         }
         sessionMeta.innerHTML = `
-          <div class="flex flex-wrap gap-3 text-xs text-slate-500">
-            <span class="font-semibold text-slate-700">${escapeHtml(
-              session.session_id
-            )}</span>
-            <span>${escapeHtml(sourceLabel(state.currentProject?.source))}</span>
-            <span>会话时间: ${formatTimestamp(session.started_at)} ~ ${formatTimestamp(session.updated_at)}</span>
-            <span>消息数: ${session.message_count || 0}</span>
-            <span>${escapeHtml(session.cwd || "")}</span>
-            <span>${escapeHtml(session.git_branch || "")}</span>
+          <div class="flex items-center justify-between">
+            <div class="flex flex-wrap gap-3 text-xs text-slate-500">
+              <span class="font-semibold text-slate-700">${escapeHtml(
+                session.session_id
+              )}</span>
+              <span>${escapeHtml(sourceLabel(state.currentProject?.source))}</span>
+              <span>会话时间: ${formatTimestamp(session.started_at)} ~ ${formatTimestamp(session.updated_at)}</span>
+              <span>消息数: ${session.message_count || 0}</span>
+              <span>${escapeHtml(session.cwd || "")}</span>
+              <span>${escapeHtml(session.git_branch || "")}</span>
+            </div>
+            <button
+              id="refreshSessionBtn"
+              class="ml-4 px-3 py-1 text-xs font-medium text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 rounded-lg transition-colors whitespace-nowrap flex-shrink-0"
+              title="刷新当前会话"
+            >
+              🔄 刷新
+            </button>
           </div>
         `;
       }
@@ -1073,6 +1096,32 @@
           await runSearch(true);
         } else {
           await loadSession(state.currentSessionId, true);
+        }
+      });
+
+      // 事件委托：刷新按钮点击
+      sessionMeta.addEventListener("click", async (event) => {
+        const refreshBtn = event.target.closest("#refreshSessionBtn");
+        if (refreshBtn && sessionMeta.contains(refreshBtn)) {
+          // 保存当前会话ID
+          const currentSessionId = state.currentSessionId;
+
+          // 重新加载会话列表（这会触发后端的索引刷新）
+          const source = state.currentProject?.source || "claude_code";
+          const project = state.currentProject?.project || "";
+          const data = await api(
+            `/api/projects/${encodeURIComponent(project)}/sessions?source=${encodeURIComponent(source)}`
+          );
+          state.sessions = data.sessions || [];
+
+          // 重新渲染会话列表
+          renderSessions();
+
+          // 如果之前有选中的会话，重新加载它
+          if (currentSessionId) {
+            state.currentSessionId = currentSessionId;
+            await loadSession(currentSessionId, false);
+          }
         }
       });
 
