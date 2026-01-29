@@ -17,7 +17,18 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Generator, Iterable, List, Literal, NotRequired, Optional, TypedDict
+from typing import Any, Dict, Generator, Iterable, List, Literal, Optional, TypedDict, Union
+
+# Python 3.9 compatibility: NotRequired is in typing (3.11+). Keep it runtime-safe for 3.9.
+try:  # pragma: no cover
+    from typing import NotRequired  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover
+    try:
+        from typing_extensions import NotRequired  # type: ignore
+    except Exception:
+        # Minimal fallback: only used for annotations; runtime behavior is irrelevant.
+        def NotRequired(tp: Any) -> Any:  # type: ignore
+            return tp
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -46,6 +57,18 @@ DB_PATH = Path(
 INDEX_LOCK = threading.Lock()
 LAST_INDEX_TIME = 0.0
 INDEX_THROTTLE_SECONDS = 30.0
+
+# Async indexing status (for UI feedback). Indexing work uses its own DB connection.
+INDEX_STATUS_LOCK = threading.Lock()
+INDEX_BG_THREAD: Optional[threading.Thread] = None
+INDEX_STATUS: Dict[str, Any] = {
+    "state": "idle",  # idle|running|ready|error
+    "started_at": "",
+    "finished_at": "",
+    "total_files": 0,
+    "processed_files": 0,
+    "last_error": "",
+}
 
 # Precompiled regex for CJK character processing
 CJK_CHAR_RE = re.compile(r"([\u4e00-\u9fff])")
@@ -101,7 +124,7 @@ class UnknownBlock(TypedDict, total=False):
     type: str
 
 
-ContentBlock = TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock | ImageBlock | UnknownBlock
+ContentBlock = Union[TextBlock, ThinkingBlock, ToolUseBlock, ToolResultBlock, ImageBlock, UnknownBlock]
 
 
 class NormalizedEvent(TypedDict):
@@ -762,6 +785,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             needs_rebuild = True
         elif "source" not in fts_sql and not needs_migration:
             needs_rebuild = True
+        # 精确跳转需要 event_id/line_no
+        elif "event_id" not in fts_sql or "line_no" not in fts_sql:
+            needs_rebuild = True
 
     if needs_rebuild:
         print("检测到旧版本数据库 schema，正在重建...")
@@ -815,6 +841,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             source UNINDEXED,
             session_id UNINDEXED,
             project UNINDEXED,
+            event_id UNINDEXED,
+            line_no UNINDEXED,
             role,
             type,
             content,
@@ -890,6 +918,8 @@ def _migrate_db_add_source(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE files_new RENAME TO files")
 
         # 迁移 messages_fts 表
+        # 注意：后续版本需要 event_id/line_no 做精确跳转，这里仅处理旧库加 source 的场景。
+        # 如果缺少 event_id/line_no，将在 init_db() 中触发自动重建。
         conn.execute(
             """
             CREATE VIRTUAL TABLE messages_fts_new
@@ -897,6 +927,8 @@ def _migrate_db_add_source(conn: sqlite3.Connection) -> None:
                 source UNINDEXED,
                 session_id UNINDEXED,
                 project UNINDEXED,
+                event_id UNINDEXED,
+                line_no UNINDEXED,
                 role,
                 type,
                 content,
@@ -908,14 +940,19 @@ def _migrate_db_add_source(conn: sqlite3.Connection) -> None:
         conn.execute(
             """
             INSERT INTO messages_fts_new (
-                source, session_id, project, role, type, content, timestamp
+                source, session_id, project, event_id, line_no, role, type, content, timestamp
             )
-            SELECT 'claude_code', session_id, project, role, type, content, timestamp
+            SELECT 'claude_code', session_id, project, '', 0, role, type, content, timestamp
             FROM messages_fts
             """
         )
         conn.execute("DROP TABLE messages_fts")
         conn.execute("ALTER TABLE messages_fts_new RENAME TO messages_fts")
+
+        # 强制下一次 ensure_index() 全量重建索引：
+        # - 老库没有 event_id/line_no，且历史数据无法补齐，只能通过重扫 jsonl 生成。
+        # - 清空 files 表会让 ensure_index() 认为全部文件都需要重新索引。
+        conn.execute("DELETE FROM files")
 
         # 创建索引
         conn.execute(
@@ -1246,7 +1283,8 @@ def index_file(conn: sqlite3.Connection, source: str, project: str, path: Path, 
     remove_file_records(conn, path_str)
 
     # 解析文件内容
-    messages: List[tuple[str, str, str, str, str, str, str]] = []
+    # messages_fts: source, session_id, project, event_id, line_no, role, type, content, timestamp
+    messages: List[tuple[str, str, str, str, int, str, str, str, str]] = []
     started_at = ""
     updated_at = ""
     message_count = 0
@@ -1258,7 +1296,7 @@ def index_file(conn: sqlite3.Connection, source: str, project: str, path: Path, 
     seen_content_hashes: set[str] = set()
 
     with path.open("r", encoding="utf-8", errors="replace") as handle:
-        for line in handle:
+        for line_no, line in enumerate(handle):
             # 使用统一的解析入口
             event = parse_event_line(line, session_id, source)
             if not event:
@@ -1332,6 +1370,8 @@ def index_file(conn: sqlite3.Connection, source: str, project: str, path: Path, 
                     source,
                     session_id,
                     project,
+                    event["id"],
+                    line_no,
                     role,
                     infer_legacy_type(role, blocks, fallback="event"),
                     preprocess_for_fts(text_for_index),  # 预处理中文文本
@@ -1381,8 +1421,8 @@ def index_file(conn: sqlite3.Connection, source: str, project: str, path: Path, 
         conn.executemany(
             """
             INSERT INTO messages_fts (
-                source, session_id, project, role, type, content, timestamp
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                source, session_id, project, event_id, line_no, role, type, content, timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             messages,
         )
@@ -1441,6 +1481,102 @@ def ensure_index(conn: sqlite3.Connection, force: bool = False) -> None:
         conn.commit()
 
 
+def _set_index_status(**kwargs: Any) -> None:
+    with INDEX_STATUS_LOCK:
+        INDEX_STATUS.update(kwargs)
+
+
+def get_index_status() -> Dict[str, Any]:
+    with INDEX_STATUS_LOCK:
+        return dict(INDEX_STATUS)
+
+
+def _run_index_in_background(*, force: bool) -> None:
+    """后台线程：执行增量索引并更新进度。"""
+    try:
+        # Keep indexing single-threaded inside this process (shared with ensure_index()).
+        with INDEX_LOCK:
+            conn = get_db()
+            init_db(conn)
+
+            # 获取已索引的文件
+            existing = {
+                row["file_path"]: row
+                for row in conn.execute("SELECT * FROM files").fetchall()
+            }
+
+            # 预扫描以提供进度
+            files = list(scan_session_files())
+            _set_index_status(total_files=len(files), processed_files=0)
+
+            current_paths: set[str] = set()
+            processed = 0
+            for source, project, path, parent_session_id in files:
+                processed += 1
+                try:
+                    path_str = str(path)
+                    mtime = path.stat().st_mtime
+                    current_paths.add(path_str)
+                    row = existing.get(path_str)
+                    # force 仅用于跳过节流并立即扫描；不要无条件重建未变化的文件索引。
+                    if row is None or row["mtime"] < mtime:
+                        index_file(conn, source, project, path, parent_session_id)
+                finally:
+                    _set_index_status(processed_files=processed)
+
+            # 删除已不存在的文件记录（force 也照做，保证一致）
+            for file_path, row in existing.items():
+                if file_path not in current_paths:
+                    remove_file_records(conn, file_path)
+
+            conn.commit()
+            conn.close()
+        _set_index_status(
+            state="ready",
+            finished_at=datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+            last_error="",
+        )
+    except Exception as e:
+        _set_index_status(
+            state="error",
+            finished_at=datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+            last_error=str(e),
+        )
+
+
+def ensure_index_async(*, force: bool = False) -> None:
+    """确保后台索引任务已启动（不会阻塞请求线程）。"""
+    global LAST_INDEX_TIME, INDEX_BG_THREAD
+
+    with INDEX_LOCK:
+        status = get_index_status()
+        if status.get("state") == "running" and INDEX_BG_THREAD and INDEX_BG_THREAD.is_alive():
+            return
+        # 失败状态不要被节流卡住
+        if status.get("state") != "error":
+            current_time = time.time()
+            if not force and current_time - LAST_INDEX_TIME < INDEX_THROTTLE_SECONDS:
+                return
+            LAST_INDEX_TIME = current_time
+        else:
+            LAST_INDEX_TIME = time.time()
+
+        _set_index_status(
+            state="running",
+            started_at=datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+            finished_at="",
+            total_files=0,
+            processed_files=0,
+            last_error="",
+        )
+        INDEX_BG_THREAD = threading.Thread(
+            target=_run_index_in_background,
+            kwargs={"force": force},
+            daemon=True,
+        )
+        INDEX_BG_THREAD.start()
+
+
 @contextmanager
 def indexed_db_session(force_refresh: bool = False) -> Generator[sqlite3.Connection, None, None]:
     """数据库连接上下文管理器（确保索引最新）
@@ -1449,7 +1585,44 @@ def indexed_db_session(force_refresh: bool = False) -> Generator[sqlite3.Connect
         force_refresh: 是否强制刷新索引，跳过节流检查
     """
     with db_session() as conn:
-        ensure_index(conn, force=force_refresh)
+        # 先确保 schema 存在（避免首次启动时 queries 直接报错）
+        init_db(conn)
+
+        # 用户显式请求 force_refresh 时，直接在该请求内同步跑一遍增量索引：
+        # - 语义更符合“刷新”
+        # - 避免每次点击都走 503 轮询
+        if force_refresh:
+            _set_index_status(
+                state="running",
+                started_at=datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+                finished_at="",
+                total_files=0,
+                processed_files=0,
+                last_error="",
+            )
+            ensure_index(conn, force=True)
+            _set_index_status(
+                state="ready",
+                finished_at=datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+                last_error="",
+            )
+            yield conn
+            return
+
+        # 启动后台索引任务（避免阻塞 API 请求）
+        ensure_index_async(force=False)
+
+        # 如果数据库为空且索引仍在构建中，则返回 503 让前端轮询进度
+        status = get_index_status()
+        if status.get("state") == "running":
+            has_any = conn.execute("SELECT 1 FROM sessions LIMIT 1").fetchone() is not None
+            if not has_any:
+                raise HTTPException(status_code=503, detail={"code": "indexing", "status": status})
+        if status.get("state") == "error":
+            has_any = conn.execute("SELECT 1 FROM sessions LIMIT 1").fetchone() is not None
+            if not has_any:
+                raise HTTPException(status_code=503, detail={"code": "index_error", "status": status})
+
         yield conn
 
 
@@ -1496,6 +1669,12 @@ def list_projects() -> Dict[str, Any]:
             """
         ).fetchall()
         return {"projects": [dict(row) for row in rows]}
+
+
+@app.get("/api/index/status")
+def index_status() -> Dict[str, Any]:
+    """获取后台索引状态（用于前端进度显示）"""
+    return {"status": get_index_status()}
 
 
 @app.get("/api/projects/{project}/sessions")
@@ -1724,6 +1903,7 @@ def search(
     q: str = Query(..., min_length=1),
     project: Optional[str] = None,
     source: Optional[str] = None,
+    session_id: Optional[str] = None,
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
 ) -> Dict[str, Any]:
@@ -1738,6 +1918,9 @@ def search(
         if source:
             where_clauses.append("source = ?")
             params.append(source)
+        if session_id:
+            where_clauses.append("session_id = ?")
+            params.append(session_id)
         where = " AND ".join(where_clauses)
 
         # 获取总数
@@ -1765,6 +1948,8 @@ def search(
                 SELECT session_id,
                        source,
                        project,
+                       event_id,
+                       line_no,
                        role,
                        type,
                        timestamp,
