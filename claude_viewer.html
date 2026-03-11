@@ -64,49 +64,8 @@
       <main class="flex-1 min-w-0 flex flex-col">
         <!-- 固定顶部区域 -->
         <div class="flex-shrink-0 bg-white">
-          <!-- 搜索栏 -->
-          <div class="border-b p-5">
-            <div class="flex items-center gap-3">
-              <input
-                id="searchInput"
-                type="text"
-                placeholder="搜索消息内容..."
-                class="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-              <label class="flex items-center gap-2 text-sm text-slate-600">
-                <span>类型</span>
-                <select
-                  id="searchSource"
-                  class="rounded-lg border border-slate-200 px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                >
-                  <option value="">全部</option>
-                  <option value="claude_code">Claude Code</option>
-                  <option value="codex">Codex</option>
-                </select>
-              </label>
-              <label class="flex items-center gap-2 text-sm text-slate-600">
-                <input type="checkbox" id="searchCurrentProjectOnly" class="rounded" />
-                <span>仅当前项目</span>
-              </label>
-              <label class="flex items-center gap-2 text-sm text-slate-600">
-                <input type="checkbox" id="searchCurrentSessionOnly" class="rounded" />
-                <span>仅当前会话</span>
-              </label>
-              <button
-                id="searchBtn"
-                class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
-              >
-                搜索
-              </button>
-              <button
-                id="clearSearchBtn"
-                class="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
-              >
-                清除
-              </button>
-            </div>
-            <div id="searchMeta" class="mt-2 text-xs text-slate-500"></div>
-            <div id="indexStatus" class="mt-1 text-xs text-slate-500"></div>
+          <div class="border-b px-5 py-3">
+            <div id="indexStatus" class="text-xs text-slate-500"></div>
           </div>
 
           <!-- 会话元信息 -->
@@ -116,9 +75,6 @@
         <!-- 可滚动消息列表区域 -->
         <div class="flex-1 min-w-0 overflow-y-auto p-6">
           <div id="messageList" class="space-y-4"></div>
-
-          <!-- 搜索结果 -->
-          <div id="searchResults" class="hidden space-y-3"></div>
 
           <!-- 加载更多按钮 -->
           <button
@@ -137,16 +93,8 @@
       const sessionList = document.getElementById("sessionList");
       const messageList = document.getElementById("messageList");
       const sessionMeta = document.getElementById("sessionMeta");
-      const searchInput = document.getElementById("searchInput");
-      const searchBtn = document.getElementById("searchBtn");
-      const clearSearchBtn = document.getElementById("clearSearchBtn");
-      const searchMeta = document.getElementById("searchMeta");
       const indexStatus = document.getElementById("indexStatus");
-      const searchResults = document.getElementById("searchResults");
-      const searchSource = document.getElementById("searchSource");
       const loadMoreBtn = document.getElementById("loadMoreBtn");
-      const searchCurrentProjectOnly = document.getElementById("searchCurrentProjectOnly");
-      const searchCurrentSessionOnly = document.getElementById("searchCurrentSessionOnly");
 
       // 应用状态
       const state = {
@@ -159,10 +107,6 @@
         offset: 0,
         limit: 200,
         hasMore: false,
-        searchQuery: "",
-        searchOffset: 0,
-        searchHasMore: false,
-        searchTotal: 0,
         expandedSessions: new Set(), // 跟踪展开的主会话ID
         roleFilters: { user: true, assistant: true, tool: true, other: true },
       };
@@ -178,13 +122,8 @@
           source: params.get("src") || "",
           project: params.get("project") || "",
           sessionId: params.get("session") || "",
-          view: params.get("view") || "",
-          q: params.get("q") || "",
           focus: params.get("focus") || "",
           offset: params.get("offset") ? Number(params.get("offset")) : NaN,
-          projectOnly: params.get("projectOnly") === "1",
-          sessionOnly: params.get("sessionOnly") === "1",
-          searchSource: params.get("searchSource") || "",
           roles,
         };
       }
@@ -196,11 +135,6 @@
         if (src) params.set("src", src);
         if (project) params.set("project", project);
         if (state.currentSessionId) params.set("session", state.currentSessionId);
-        params.set("view", isSearchView() ? "search" : "session");
-        if (isSearchView() && state.searchQuery) params.set("q", state.searchQuery);
-        if (searchCurrentProjectOnly.checked) params.set("projectOnly", "1");
-        if (searchCurrentSessionOnly.checked) params.set("sessionOnly", "1");
-        if (searchSource.value) params.set("searchSource", searchSource.value);
         if (state.sessionStartOffset) params.set("offset", String(state.sessionStartOffset));
         if (extra.focus) params.set("focus", String(extra.focus));
         const rf = state.roleFilters || {};
@@ -269,25 +203,28 @@
       }
 
       function renderMarkdown(text) {
-        const raw = marked.parse(String(text || ""));
+        const source = String(text || "");
+        const renderer = new marked.Renderer();
+        renderer.image = (...args) => {
+          let href = "";
+          let alt = "";
+          if (args.length === 1 && args[0] && typeof args[0] === "object") {
+            href = String(args[0].href || "");
+            alt = String(args[0].text || "");
+          } else {
+            href = String(args[0] || "");
+            alt = String(args[2] || "");
+          }
+          const label = alt ? `![${alt}]` : "![image]";
+          const target = href ? ` <code>${escapeHtml(href)}</code>` : "";
+          return `<span class="inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-600">🖼️ ${escapeHtml(label)}${target}</span>`;
+        };
+        const raw = marked.parse(source, { renderer });
         // DOMPurify may not be available (e.g. offline). Fallback: render as plain text.
         if (typeof window.DOMPurify === "undefined") {
-          return escapeHtml(String(text || "")).replace(/\n/g, "<br />");
+          return escapeHtml(source).replace(/\n/g, "<br />");
         }
-        return window.DOMPurify.sanitize(raw);
-      }
-
-      function highlight(text, query) {
-        const safe = escapeHtml(text || "");
-        if (!query) return safe;
-        const terms = query.trim().split(/\s+/).filter(Boolean);
-        if (!terms.length) return safe;
-        let out = safe;
-        for (const term of terms) {
-          const regex = new RegExp(escapeRegex(term), "ig");
-          out = out.replace(regex, (match) => `<mark>${match}</mark>`);
-        }
-        return out;
+        return window.DOMPurify.sanitize(raw, { FORBID_TAGS: ["img"] });
       }
 
       function setIndexStatusText(text, isError = false) {
@@ -514,59 +451,6 @@
 
         wrapper.appendChild(mainArea);
         return wrapper;
-      }
-
-      /**
-       * 创建搜索结果卡片
-       * 使用 data-* 属性而不是闭包，配合事件委托
-       */
-      function createSearchResultCard(result) {
-        const card = document.createElement("div");
-        card.className =
-          "rounded-xl border border-slate-200 bg-white p-4 shadow-sm hover:shadow-md transition-shadow";
-
-        const src = result.source || "claude_code";
-        card.innerHTML = `
-          <div class="flex items-center justify-between text-xs text-slate-500">
-            <span class="font-semibold text-slate-700">${escapeHtml(
-              `${sourceLabel(src)} ${result.project}`
-            )}</span>
-            <span>${formatTimestamp(result.timestamp)}</span>
-          </div>
-          <div class="mt-2 text-xs text-slate-400">
-            会话 ${escapeHtml(result.session_id)}
-          </div>
-          <div class="mt-3 text-sm text-slate-800 whitespace-pre-wrap break-words">
-            ${highlight(result.excerpt || "", state.searchQuery)}
-          </div>
-          <div class="mt-3 flex gap-3">
-            <button
-              type="button"
-              class="text-xs font-medium text-indigo-600 hover:text-indigo-800"
-              data-action="jump-to-message"
-              data-session="${escapeHtml(result.session_id)}"
-              data-project="${escapeHtml(result.project)}"
-              data-source="${escapeHtml(src)}"
-              data-event-id="${escapeHtml(result.event_id || "")}"
-              data-line-no="${escapeHtml(result.line_no ?? "")}"
-              data-timestamp="${escapeHtml(result.timestamp)}"
-            >
-              跳转到消息 →
-            </button>
-            <button
-              type="button"
-              class="text-xs font-medium text-slate-600 hover:text-slate-800"
-              data-action="open-session"
-              data-session="${escapeHtml(result.session_id)}"
-              data-project="${escapeHtml(result.project)}"
-              data-source="${escapeHtml(src)}"
-            >
-              打开会话 →
-            </button>
-          </div>
-        `;
-
-        return card;
       }
 
       /**
@@ -1102,31 +986,8 @@
         applyMessageRoleFilter();
       }
 
-      function renderSearchResults(results, append = false) {
-        if (!append) {
-          searchResults.innerHTML = "";
-        }
-        if (!results.length && !append) {
-          searchResults.innerHTML =
-            '<div class="text-sm text-slate-400">未找到结果</div>';
-          return;
-        }
-
-        // 使用 DocumentFragment 减少重排重绘
-        const fragment = document.createDocumentFragment();
-        for (const result of results) {
-          fragment.appendChild(createSearchResultCard(result));
-        }
-        searchResults.appendChild(fragment);
-      }
-
-      function isSearchView() {
-        return !searchResults.classList.contains("hidden");
-      }
-
       function toggleAllDetails(open) {
-        const container = isSearchView() ? searchResults : messageList;
-        const details = container.querySelectorAll("details");
+        const details = messageList.querySelectorAll("details");
         for (const el of details) {
           el.open = Boolean(open);
         }
@@ -1158,7 +1019,7 @@
         state.currentProject = projectObj;
         state.currentProjectKey = key;
         projectSelect.value = key;
-        // 搜索跳转时不自动打开第一个会话，避免闪屏/多余请求
+        // 切换项目时不自动打开第一个会话，避免闪屏/多余请求
         await loadSessions(projectObj, false);
       }
 
@@ -1178,56 +1039,6 @@
             }, 2000);
           }
         }, 100);
-      }
-
-      async function openSessionFromSearch({ sessionId, project, source, eventId, lineNo, timestamp }) {
-        await ensureProjectLoaded({ source: source || "claude_code", project });
-        // 为命中消息留出一些上下文（按 jsonl 行号偏移）
-        let initialOffset = null;
-        const before = 80;
-        if (Number.isFinite(lineNo) && lineNo >= 0) {
-          initialOffset = Math.max(0, Math.floor(lineNo) - before);
-        }
-
-        await loadSession(sessionId, false, initialOffset, "replace");
-        showSessionView();
-        const target = eventId ? eventId : timestamp;
-        if (target) scrollToMessage(target);
-        pushUrl({ focus: eventId || "" });
-      }
-
-      function setViewMode(showSearch) {
-        searchResults.classList.toggle("hidden", !showSearch);
-        messageList.classList.toggle("hidden", showSearch);
-        if (showSearch) {
-          loadMoreBtn.classList.add("hidden");
-        }
-        syncUrl();
-      }
-
-      function showSearchView() {
-        setViewMode(true);
-      }
-
-      function showSessionView() {
-        setViewMode(false);
-      }
-
-      function updateSearchScopeUi() {
-        const hasSession = Boolean(state.currentSessionId);
-        searchCurrentSessionOnly.disabled = !hasSession;
-        if (!hasSession && searchCurrentSessionOnly.checked) {
-          searchCurrentSessionOnly.checked = false;
-        }
-
-        // 如果选了“仅当前会话”，则强制依赖当前项目/source，不允许再选其他过滤
-        const sessionOnly = searchCurrentSessionOnly.checked;
-        searchCurrentProjectOnly.disabled = sessionOnly;
-        searchSource.disabled = sessionOnly;
-        if (sessionOnly) {
-          searchCurrentProjectOnly.checked = false;
-          searchSource.value = "";
-        }
       }
 
       // 数据加载函数
@@ -1258,36 +1069,16 @@
           };
         }
 
-        // 如果 URL 指定了 session 或者直接进入 search 视图，就不要自动打开第一个会话
-        const autoOpenFirst = !(initial.sessionId || initial.view === "search" || initial.q);
+        const autoOpenFirst = !initial.sessionId;
         await loadSessions(state.currentProject, autoOpenFirst);
-        updateSearchScopeUi();
 
-        // 还原搜索参数
-        searchSource.value = initial.searchSource || "";
-        searchCurrentProjectOnly.checked = Boolean(initial.projectOnly);
-        searchCurrentSessionOnly.checked = Boolean(initial.sessionOnly);
-
-        // 如果 URL 指定了 session，则优先打开该会话（可带 offset）
         if (initial.sessionId) {
           const overrideOffset = Number.isFinite(initial.offset) ? initial.offset : 0;
           await loadSession(initial.sessionId, false, overrideOffset);
-          showSessionView();
           if (initial.focus) scrollToMessage(initial.focus);
           syncUrl({ focus: initial.focus || "" });
-          updateSearchScopeUi();
         }
 
-        // 如果 URL 指定了搜索，进入搜索视图
-        if (initial.q) {
-          searchInput.value = initial.q;
-          await runSearch(false);
-          showSearchView();
-          syncUrl();
-        } else if (initial.view === "search") {
-          showSearchView();
-          syncUrl();
-        }
         suppressUrlSync = false;
       }
 
@@ -1319,13 +1110,10 @@
         }
         messageList.innerHTML =
           '<div class="text-sm text-slate-400">选择一个会话查看</div>';
-        updateSearchScopeUi();
       }
 
       async function loadSession(sessionId, append = false, overrideOffset = null, urlMode = "replace") {
         state.currentSessionId = sessionId;
-        // 如果不是追加模式，支持从指定 offset 打开（用于搜索跳转）
-        // offset 是 jsonl 的行号偏移（后端按行流式分页）
         const requestedOffset = append ? state.offset : (Number.isFinite(overrideOffset) ? overrideOffset : 0);
         if (!append) {
           state.sessionStartOffset = requestedOffset;
@@ -1349,71 +1137,8 @@
         renderMessages(data.items || []);
         loadMoreBtn.classList.toggle("hidden", !state.hasMore);
         renderSessions();
-        showSessionView();
         if (urlMode === "push") pushUrl();
         else syncUrl();
-        updateSearchScopeUi();
-      }
-
-      async function runSearch(append = false, urlMode = "replace") {
-        const query = searchInput.value.trim();
-        state.searchQuery = query;
-        if (!query) {
-          searchMeta.textContent = "";
-          showSessionView();
-          if (urlMode === "push") pushUrl();
-          else syncUrl();
-          return;
-        }
-
-        // 如果不是追加模式，重置搜索状态
-        if (!append) {
-          state.searchOffset = 0;
-          searchResults.innerHTML = "";
-        }
-
-        let path = `/api/search?q=${encodeURIComponent(query)}&offset=${state.searchOffset}&limit=50`;
-        // “仅当前会话”优先级最高
-        if (searchCurrentSessionOnly.checked && state.currentProject?.project && state.currentSessionId) {
-          path += `&project=${encodeURIComponent(state.currentProject.project)}`;
-          path += `&source=${encodeURIComponent(state.currentProject.source || "claude_code")}`;
-          path += `&session_id=${encodeURIComponent(state.currentSessionId)}`;
-        } else if (searchCurrentProjectOnly.checked && state.currentProject?.project) {
-          path += `&project=${encodeURIComponent(state.currentProject.project)}`;
-          path += `&source=${encodeURIComponent(state.currentProject.source || "claude_code")}`;
-        } else if (searchSource.value) {
-          path += `&source=${encodeURIComponent(searchSource.value)}`;
-        }
-        try {
-          const data = await api(path);
-          state.searchTotal = data.total || 0;
-          state.searchHasMore = data.has_more || false;
-          state.searchOffset = data.offset + (data.results?.length || 0);
-
-          searchMeta.textContent = `找到 ${state.searchTotal} 条结果，已显示 ${state.searchOffset} 条`;
-
-          renderSearchResults(data.results || [], append);
-          showSearchView();
-          if (!append) {
-            if (urlMode === "push") pushUrl();
-            else syncUrl();
-          } else {
-            syncUrl();
-          }
-
-          // 显示或隐藏"加载更多"按钮
-          loadMoreBtn.classList.toggle("hidden", !state.searchHasMore);
-        } catch (error) {
-          searchMeta.textContent = `搜索错误: ${error.message}`;
-          searchResults.innerHTML = `<div class="text-sm text-red-600">${escapeHtml(error.message)}</div>`;
-          showSearchView();
-          if (!append) {
-            if (urlMode === "push") pushUrl();
-            else syncUrl();
-          } else {
-            syncUrl();
-          }
-        }
       }
 
       // 事件监听
@@ -1453,61 +1178,8 @@
         loadSession(sessionId, false, null, "push").catch(console.error);
       });
 
-      // 事件委托：搜索结果点击（替代逐条 addEventListener）
-      searchResults.addEventListener("click", (event) => {
-        const btn = event.target.closest("button[data-action]");
-        if (!btn || !searchResults.contains(btn)) return;
-
-        const action = btn.dataset.action || "";
-        const sessionId = btn.dataset.session || "";
-        const project = btn.dataset.project || "";
-        const source = btn.dataset.source || "";
-        const timestamp = btn.dataset.timestamp || "";
-        const eventId = btn.dataset.eventId || "";
-        const lineNo = btn.dataset.lineNo ? Number(btn.dataset.lineNo) : NaN;
-
-        if (!sessionId || !project) return;
-
-        if (action === "jump-to-message") {
-          openSessionFromSearch({ sessionId, project, source, eventId, lineNo, timestamp }).catch(console.error);
-          return;
-        }
-        if (action === "open-session") {
-          openSessionFromSearch({ sessionId, project, source }).catch(console.error);
-        }
-      });
-
-      searchBtn.addEventListener("click", () => runSearch(false, "push"));
-      clearSearchBtn.addEventListener("click", () => {
-        searchInput.value = "";
-        state.searchQuery = "";
-        searchMeta.textContent = "";
-        showSessionView();
-        pushUrl();
-      });
-      searchInput.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") {
-          runSearch(false, "push");
-        }
-      });
       loadMoreBtn.addEventListener("click", async () => {
-        if (isSearchView()) {
-          await runSearch(true);
-        } else {
-          await loadSession(state.currentSessionId, true);
-        }
-      });
-
-      searchCurrentSessionOnly.addEventListener("change", () => {
-        updateSearchScopeUi();
-        syncUrl();
-      });
-      searchCurrentProjectOnly.addEventListener("change", () => {
-        updateSearchScopeUi();
-        syncUrl();
-      });
-      searchSource.addEventListener("change", () => {
-        syncUrl();
+        await loadSession(state.currentSessionId, true);
       });
 
       // 事件委托：刷新按钮点击
@@ -1600,7 +1272,6 @@
         suppressUrlSync = true;
         const u = readUrlState();
 
-        // 还原 role filters（URL 不带 roles 时视为全选）
         if (u.roles) {
           state.roleFilters = {
             user: u.roles.has("user"),
@@ -1619,20 +1290,7 @@
         if (u.sessionId) {
           const overrideOffset = Number.isFinite(u.offset) ? u.offset : 0;
           await loadSession(u.sessionId, false, overrideOffset);
-          showSessionView();
           if (u.focus) scrollToMessage(u.focus);
-        }
-        if (u.q) {
-          searchInput.value = u.q;
-          searchSource.value = u.searchSource || "";
-          searchCurrentProjectOnly.checked = Boolean(u.projectOnly);
-          searchCurrentSessionOnly.checked = Boolean(u.sessionOnly);
-          await runSearch(false);
-          showSearchView();
-        } else if (u.view === "search") {
-          showSearchView();
-        } else {
-          showSessionView();
         }
         renderSessionMeta();
         applyMessageRoleFilter();

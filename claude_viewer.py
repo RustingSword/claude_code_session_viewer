@@ -1,7 +1,6 @@
 """Claude Code Session Viewer - Backend API
 
-提供 Claude Code 会话历史的查看和搜索功能。
-使用 SQLite FTS5 进行全文索引和搜索。
+提供 Claude Code/Codex 会话历史的浏览接口。
 """
 
 from __future__ import annotations
@@ -10,7 +9,6 @@ from abc import ABC, abstractmethod
 import hashlib
 import json
 import os
-import re
 import sqlite3
 import threading
 import time
@@ -32,12 +30,6 @@ except Exception:  # pragma: no cover
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
-
-try:
-    import jieba
-    JIEBA_AVAILABLE = True
-except ImportError:
-    JIEBA_AVAILABLE = False
 
 # 配置路径
 BASE_DIR = Path(__file__).resolve().parent
@@ -69,10 +61,6 @@ INDEX_STATUS: Dict[str, Any] = {
     "processed_files": 0,
     "last_error": "",
 }
-
-# Precompiled regex for CJK character processing
-CJK_CHAR_RE = re.compile(r"([\u4e00-\u9fff])")
-CJK_SPACE_RE = re.compile(r"\s*([\u4e00-\u9fff])\s*")
 
 app = FastAPI(title="Claude Session Viewer", version="1.0.0")
 
@@ -190,7 +178,7 @@ def blocks_to_json_string(blocks: List[ContentBlock]) -> str:
 
 
 def blocks_to_plaintext(blocks: List[ContentBlock]) -> str:
-    """将 blocks 转换为纯文本（用于全文索引和搜索）"""
+    """将 blocks 转换为纯文本（用于生成摘要和统计）"""
     parts: List[str] = []
 
     for block in blocks:
@@ -233,7 +221,7 @@ def blocks_to_plaintext(blocks: List[ContentBlock]) -> str:
                 parts.append(text)
 
         elif block_type == "image":
-            # 图片不参与文本搜索，只保留占位符
+            # 图片不参与文本摘要，只保留占位符
             source = block.get("source")
             if isinstance(source, dict):
                 media_type = str(source.get("media_type", "")).strip()
@@ -760,47 +748,23 @@ def init_db(conn: sqlite3.Connection) -> None:
 
     if row:
         schema_sql = row[0]
-        # 检查是否有 source 字段
         if "source" not in schema_sql:
             needs_migration = True
-        # 检查是否有 parent_session_id 字段
         elif "parent_session_id" not in schema_sql:
             needs_rebuild = True
-        # 检查主键是否正确
         elif "PRIMARY KEY (source, project, session_id)" not in schema_sql:
-            needs_rebuild = True
-
-    # 检查 FTS 表
-    cursor = conn.execute(
-        """
-        SELECT sql FROM sqlite_master
-        WHERE type='table' AND name='messages_fts'
-        """
-    )
-    fts_row = cursor.fetchone()
-    if fts_row:
-        fts_sql = fts_row[0]
-        # tokenizer 不匹配需要重建；缺少 source 列优先走迁移（若 sessions 也缺 source）
-        if "tokenize='unicode61'" not in fts_sql:
-            needs_rebuild = True
-        elif "source" not in fts_sql and not needs_migration:
-            needs_rebuild = True
-        # 精确跳转需要 event_id/line_no
-        elif "event_id" not in fts_sql or "line_no" not in fts_sql:
             needs_rebuild = True
 
     if needs_rebuild:
         print("检测到旧版本数据库 schema，正在重建...")
         conn.execute("DROP TABLE IF EXISTS sessions")
         conn.execute("DROP TABLE IF EXISTS files")
-        conn.execute("DROP TABLE IF EXISTS messages_fts")
         needs_migration = False
     elif needs_migration:
         print("检测到需要迁移数据库，正在执行平滑迁移...")
         _migrate_db_add_source(conn)
         return
 
-    # 会话元数据表
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS sessions (
@@ -820,7 +784,6 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
 
-    # 文件索引表（用于增量更新）
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS files (
@@ -833,28 +796,12 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
 
-    # 全文搜索表 - 使用 unicode61 tokenizer
-    conn.execute(
-        """
-        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
-        USING fts5(
-            source UNINDEXED,
-            session_id UNINDEXED,
-            project UNINDEXED,
-            event_id UNINDEXED,
-            line_no UNINDEXED,
-            role,
-            type,
-            content,
-            timestamp UNINDEXED,
-            tokenize='unicode61'
-        )
-        """
-    )
-
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sessions_source_project ON sessions(source, project)"
     )
+
+    # 旧版本可能遗留 FTS 表；当前版本已不再使用全文索引。
+    conn.execute("DROP TABLE IF EXISTS messages_fts")
 
 
 def _migrate_db_add_source(conn: sqlite3.Connection) -> None:
@@ -862,7 +809,6 @@ def _migrate_db_add_source(conn: sqlite3.Connection) -> None:
     try:
         conn.execute("BEGIN")
 
-        # 迁移 sessions 表
         conn.execute(
             """
             CREATE TABLE sessions_new (
@@ -895,7 +841,6 @@ def _migrate_db_add_source(conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE sessions")
         conn.execute("ALTER TABLE sessions_new RENAME TO sessions")
 
-        # 迁移 files 表
         conn.execute(
             """
             CREATE TABLE files_new (
@@ -917,54 +862,19 @@ def _migrate_db_add_source(conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE files")
         conn.execute("ALTER TABLE files_new RENAME TO files")
 
-        # 迁移 messages_fts 表
-        # 注意：后续版本需要 event_id/line_no 做精确跳转，这里仅处理旧库加 source 的场景。
-        # 如果缺少 event_id/line_no，将在 init_db() 中触发自动重建。
-        conn.execute(
-            """
-            CREATE VIRTUAL TABLE messages_fts_new
-            USING fts5(
-                source UNINDEXED,
-                session_id UNINDEXED,
-                project UNINDEXED,
-                event_id UNINDEXED,
-                line_no UNINDEXED,
-                role,
-                type,
-                content,
-                timestamp UNINDEXED,
-                tokenize='unicode61'
-            )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO messages_fts_new (
-                source, session_id, project, event_id, line_no, role, type, content, timestamp
-            )
-            SELECT 'claude_code', session_id, project, '', 0, role, type, content, timestamp
-            FROM messages_fts
-            """
-        )
-        conn.execute("DROP TABLE messages_fts")
-        conn.execute("ALTER TABLE messages_fts_new RENAME TO messages_fts")
-
-        # 强制下一次 ensure_index() 全量重建索引：
-        # - 老库没有 event_id/line_no，且历史数据无法补齐，只能通过重扫 jsonl 生成。
-        # - 清空 files 表会让 ensure_index() 认为全部文件都需要重新索引。
-        conn.execute("DELETE FROM files")
-
-        # 创建索引
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_source_project ON sessions(source, project)"
         )
+
+        # 旧版全文索引在当前版本中不再需要；删除后让元数据缓存重新建立。
+        conn.execute("DROP TABLE IF EXISTS messages_fts")
+        conn.execute("DELETE FROM files")
 
         conn.execute("COMMIT")
         print("数据库迁移完成")
     except Exception as e:
         conn.execute("ROLLBACK")
         print(f"迁移失败: {e}，将重建数据库")
-        # 重建
         conn.execute("DROP TABLE IF EXISTS sessions")
         conn.execute("DROP TABLE IF EXISTS files")
         conn.execute("DROP TABLE IF EXISTS messages_fts")
@@ -981,52 +891,6 @@ def stringify(value: Any) -> str:
         return json.dumps(value, ensure_ascii=True)
     except Exception:
         return str(value)
-
-
-def preprocess_for_fts(text: str) -> str:
-    """预处理文本以支持中文FTS搜索
-
-    优先使用 jieba 分词（如果可用），否则回退到字符级分词。
-
-    jieba 方案优点：
-    - 专业的中文分词，准确度高
-    - 数据库更小（不需要在每个字符后加空格）
-    - 支持词语级别的搜索
-
-    字符级方案（回退）：
-    - 无需额外依赖
-    - 在每个中文字符后添加空格
-    """
-    if not text:
-        return ""
-
-    if JIEBA_AVAILABLE:
-        # 使用 jieba 搜索引擎模式分词（生成多粒度的词）
-        words = jieba.cut_for_search(text)
-        # 过滤空白词
-        words = [w.strip() for w in words if w.strip()]
-        return " ".join(words)
-    else:
-        # 回退到字符级分词
-        return CJK_CHAR_RE.sub(r"\1 ", text)
-
-
-def restore_from_fts(text: str) -> str:
-    """还原FTS预处理的文本
-
-    jieba 模式：去除分词产生的空格
-    字符级模式：去除中文字符后的空格
-    """
-    if not text:
-        return ""
-
-    if JIEBA_AVAILABLE:
-        # jieba 分词后简单去除多余空格
-        # 注意：无法完美还原，但搜索结果使用原始文本，所以影响不大
-        return re.sub(r'\s+', '', text)
-    else:
-        # 去掉中文字符后的空格
-        return re.sub(r"([\u4e00-\u9fff])\s+", r"\1", text)
 
 
 def normalize_timestamp(value: Any) -> str:
@@ -1129,50 +993,6 @@ def normalize_codex_event(
     return get_parser(source).parse_raw(raw, fallback_session_id, event_id=event_id)
 
 
-def extract_excerpt_with_context(content: str, query: str, max_length: int = 400) -> str:
-    """提取包含关键词上下文的摘要
-
-    Args:
-        content: 完整文本内容
-        query: 搜索关键词
-        max_length: 摘要最大长度
-
-    Returns:
-        包含关键词的摘要文本
-    """
-    if not content or not query:
-        return content[:max_length] if content else ""
-
-    # 查找关键词位置（不区分大小写）
-    query_lower = query.lower()
-    content_lower = content.lower()
-    pos = content_lower.find(query_lower)
-
-    if pos == -1:
-        # 找不到关键词，返回开头
-        return content[:max_length]
-
-    # 计算摘要的起始和结束位置
-    # 尽量让关键词居中，但如果关键词在开头或结尾，则调整
-    half_length = max_length // 2
-    start = max(0, pos - half_length)
-    end = min(len(content), start + max_length)
-
-    # 如果end到达末尾，调整start以显示更多内容
-    if end == len(content) and len(content) > max_length:
-        start = max(0, end - max_length)
-
-    excerpt = content[start:end]
-
-    # 添加省略号
-    if start > 0:
-        excerpt = "..." + excerpt
-    if end < len(content):
-        excerpt = excerpt + "..."
-
-    return excerpt
-
-
 def normalize_event(
     raw: Dict[str, Any],
     fallback_session_id: str,
@@ -1260,15 +1080,6 @@ def scan_session_files() -> Iterable[tuple[str, str, Path, Optional[str]]]:
 
 def remove_file_records(conn: sqlite3.Connection, file_path: str) -> None:
     """删除文件相关的所有记录"""
-    rows = conn.execute(
-        "SELECT source, project, session_id FROM sessions WHERE file_path = ?",
-        (file_path,),
-    ).fetchall()
-    for row in rows:
-        conn.execute(
-            "DELETE FROM messages_fts WHERE source = ? AND project = ? AND session_id = ?",
-            (row["source"], row["project"], row["session_id"]),
-        )
     conn.execute("DELETE FROM sessions WHERE file_path = ?", (file_path,))
     conn.execute("DELETE FROM files WHERE file_path = ?", (file_path,))
 
@@ -1282,9 +1093,7 @@ def index_file(conn: sqlite3.Connection, source: str, project: str, path: Path, 
     # 删除旧记录
     remove_file_records(conn, path_str)
 
-    # 解析文件内容
-    # messages_fts: source, session_id, project, event_id, line_no, role, type, content, timestamp
-    messages: List[tuple[str, str, str, str, int, str, str, str, str]] = []
+    # 解析文件内容并提取会话元数据
     started_at = ""
     updated_at = ""
     message_count = 0
@@ -1296,7 +1105,7 @@ def index_file(conn: sqlite3.Connection, source: str, project: str, path: Path, 
     seen_content_hashes: set[str] = set()
 
     with path.open("r", encoding="utf-8", errors="replace") as handle:
-        for line_no, line in enumerate(handle):
+        for _, line in enumerate(handle):
             # 使用统一的解析入口
             event = parse_event_line(line, session_id, source)
             if not event:
@@ -1321,10 +1130,10 @@ def index_file(conn: sqlite3.Connection, source: str, project: str, path: Path, 
             if event_git and not git_branch:
                 git_branch = event_git
 
-            # 转换为纯文本用于索引
+            # 转换为纯文本用于摘要与统计
             text_for_index = blocks_to_plaintext(blocks)
             if not text_for_index:
-                # 没有可索引内容，跳过（但时间范围和元数据已更新）
+                # 没有可用于摘要的内容，跳过（但时间范围和元数据已更新）
                 continue
 
             # Codex 去重：过滤 event_msg 类型的 user_message 和 agent_message
@@ -1364,21 +1173,6 @@ def index_file(conn: sqlite3.Connection, source: str, project: str, path: Path, 
                 if not summary and text_for_index:
                     summary = text_for_index[:160]
 
-            # 添加到全文搜索索引
-            messages.append(
-                (
-                    source,
-                    session_id,
-                    project,
-                    event["id"],
-                    line_no,
-                    role,
-                    infer_legacy_type(role, blocks, fallback="event"),
-                    preprocess_for_fts(text_for_index),  # 预处理中文文本
-                    timestamp,
-                )
-            )
-
     if not started_at:
         started_at = normalize_timestamp(mtime)
     if not updated_at:
@@ -1415,17 +1209,6 @@ def index_file(conn: sqlite3.Connection, source: str, project: str, path: Path, 
             parent_session_id,
         ),
     )
-
-    # 插入消息到全文搜索表
-    if messages:
-        conn.executemany(
-            """
-            INSERT INTO messages_fts (
-                source, session_id, project, event_id, line_no, role, type, content, timestamp
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            messages,
-        )
 
     # 记录文件索引状态
     conn.execute(
@@ -1895,92 +1678,4 @@ def get_session(
             "limit": limit,
             "next_offset": next_offset,
             "items": items,
-        }
-
-
-@app.get("/api/search")
-def search(
-    q: str = Query(..., min_length=1),
-    project: Optional[str] = None,
-    source: Optional[str] = None,
-    session_id: Optional[str] = None,
-    offset: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
-) -> Dict[str, Any]:
-    """全文搜索"""
-    query = preprocess_for_fts(q.strip()).strip()
-    with indexed_db_session() as conn:
-        params: List[Any] = [query]
-        where_clauses = ["messages_fts MATCH ?"]
-        if project:
-            where_clauses.append("project = ?")
-            params.append(project)
-        if source:
-            where_clauses.append("source = ?")
-            params.append(source)
-        if session_id:
-            where_clauses.append("session_id = ?")
-            params.append(session_id)
-        where = " AND ".join(where_clauses)
-
-        # 获取总数
-        count_params = params.copy()
-        try:
-            count_row = conn.execute(
-                f"""
-                SELECT COUNT(*) as total
-                FROM messages_fts
-                WHERE {where}
-                """,
-                count_params,
-            ).fetchone()
-            total = count_row['total'] if count_row else 0
-        except sqlite3.OperationalError:
-            total = 0
-
-        # 获取分页结果
-        params.append(limit)
-        params.append(offset)
-
-        try:
-            rows = conn.execute(
-                f"""
-                SELECT session_id,
-                       source,
-                       project,
-                       event_id,
-                       line_no,
-                       role,
-                       type,
-                       timestamp,
-                       content
-                FROM messages_fts
-                WHERE {where}
-                ORDER BY bm25(messages_fts)
-                LIMIT ? OFFSET ?
-                """,
-                params,
-            ).fetchall()
-            # 还原文本并提取包含关键词的摘要
-            results = []
-            for row in rows:
-                row_dict = dict(row)
-                # 还原完整文本
-                full_content = restore_from_fts(row_dict['content'])
-                # 提取包含关键词的摘要
-                row_dict['excerpt'] = extract_excerpt_with_context(full_content, q, max_length=400)
-                # 移除完整content，只保留excerpt
-                del row_dict['content']
-                results.append(row_dict)
-        except sqlite3.OperationalError as e:
-            raise HTTPException(status_code=400, detail=f"搜索语法错误: {str(e)}")
-
-        has_more = (offset + len(results)) < total
-        return {
-            "query": q,
-            "results": results,
-            "total": total,
-            "offset": offset,
-            "limit": limit,
-            "has_more": has_more,
         }
